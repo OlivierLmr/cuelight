@@ -1,33 +1,40 @@
 //! The discrete-event simulator.
 //!
 //! Strictly sequential: exactly one node runs at a time, and it must emit `done` before logical
-//! time may advance. Every source of nondeterminism the harness controls — message delay, and the
-//! order of events falling at the same instant — is drawn from the seeded PRNG.
+//! time may advance. Everything the harness controls is pinned by the scenario, so a run replays
+//! exactly.
 
 use crate::journal::Journal;
 use crate::node::{Node, NodeError};
 use crate::proto::{Envelope, HARNESS};
 use crate::rng::Rng;
+use crate::scenario::{Fault, Scenario};
 use serde_json::json;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub struct Config {
     pub program: Vec<String>,
-    pub node_count: usize,
-    pub f: usize,
-    pub seed: u64,
-    pub min_delay: u64,
-    pub max_delay: u64,
-    pub time_limit: u64,
+    pub scenario: Scenario,
     pub run_dir: PathBuf,
+    pub watchdog: Duration,
+}
+
+#[derive(Debug)]
+pub struct Outcome {
+    pub ok: bool,
+    pub reason: String,
+    pub end_time: u64,
+    pub events: u64,
 }
 
 #[derive(Debug, Clone)]
 enum Ev {
-    Deliver(Envelope),
+    Deliver { from: usize, env: Envelope },
     Timer { node: usize, timer_id: u64 },
+    Fault(usize),
 }
 
 struct Scheduled {
@@ -38,28 +45,23 @@ struct Scheduled {
 }
 
 impl PartialEq for Scheduled {
-    fn eq(&self, o: &Self) -> bool {
-        self.cmp(o) == Ordering::Equal
-    }
+    fn eq(&self, o: &Self) -> bool { self.cmp(o) == Ordering::Equal }
 }
 impl Eq for Scheduled {}
 impl Ord for Scheduled {
     /// Reversed: `BinaryHeap` is a max-heap and we want the earliest event first.
     ///
-    /// `tiebreak` is drawn from the PRNG at insertion, so events landing at the same logical
-    /// instant are ordered by the seed rather than by insertion order. Without this a seed sweep
-    /// would re-explore one interleaving forever. `seq` only breaks exact tiebreak collisions.
+    /// `tiebreak` is drawn from the PRNG at insertion, so events landing at the same instant are
+    /// ordered by the seed rather than by insertion order — without this a sweep would re-explore
+    /// a single interleaving forever. `seq` only breaks exact tiebreak collisions.
     fn cmp(&self, o: &Self) -> Ordering {
-        o.time
-            .cmp(&self.time)
+        o.time.cmp(&self.time)
             .then_with(|| o.tiebreak.cmp(&self.tiebreak))
             .then_with(|| o.seq.cmp(&self.seq))
     }
 }
 impl PartialOrd for Scheduled {
-    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
-        Some(self.cmp(o))
-    }
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) }
 }
 
 pub struct Sim {
@@ -71,25 +73,46 @@ pub struct Sim {
     journal: Journal,
     now: u64,
     seq: u64,
+    paused_until: Vec<u64>,
+    partition_until: u64,
+    partition_side: Vec<bool>,
+    link_count: HashMap<(usize, usize), u64>,
+    last_sched: HashMap<(usize, usize), u64>,
 }
 
 impl Sim {
     pub fn new(cfg: Config) -> Result<Sim, String> {
         std::fs::create_dir_all(&cfg.run_dir).map_err(|e| e.to_string())?;
+        std::fs::write(cfg.run_dir.join("scenario.json"), cfg.scenario.to_json())
+            .map_err(|e| e.to_string())?;
         let journal =
             Journal::create(&cfg.run_dir.join("journal.jsonl")).map_err(|e| e.to_string())?;
 
-        let ids: Vec<String> = (0..cfg.node_count).map(|i| format!("n{i}")).collect();
+        let n = cfg.scenario.nodes;
+        let ids: Vec<String> = (0..n).map(|i| format!("n{i}")).collect();
         let mut nodes = Vec::new();
         let mut index = HashMap::new();
         for (i, id) in ids.iter().enumerate() {
-            let n = Node::spawn(id, &cfg.program, &cfg.run_dir).map_err(|e| e.to_string())?;
-            nodes.push(n);
+            nodes.push(Node::spawn(id, &cfg.program, &cfg.run_dir).map_err(|e| e.to_string())?);
             index.insert(id.clone(), i);
         }
 
-        let rng = Rng::new(cfg.seed);
-        Ok(Sim { cfg, rng, nodes, index, queue: BinaryHeap::new(), journal, now: 0, seq: 0 })
+        let rng = Rng::new(cfg.scenario.seed ^ 0xD1B5_4A32_D192_ED03);
+        Ok(Sim {
+            rng,
+            nodes,
+            index,
+            queue: BinaryHeap::new(),
+            journal,
+            now: 0,
+            seq: 0,
+            paused_until: vec![0; n],
+            partition_until: 0,
+            partition_side: vec![false; n],
+            link_count: HashMap::new(),
+            last_sched: HashMap::new(),
+            cfg,
+        })
     }
 
     fn schedule(&mut self, time: u64, ev: Ev) {
@@ -99,12 +122,15 @@ impl Sim {
         self.queue.push(Scheduled { time, tiebreak, seq, ev });
     }
 
-    /// Deliver one event to a node and route everything it emits.
+    fn split_by_partition(&self, a: usize, b: usize) -> bool {
+        self.now < self.partition_until && self.partition_side[a] != self.partition_side[b]
+    }
+
     fn step_node(&mut self, idx: usize, event: Envelope) -> Result<(), String> {
         if !self.nodes[idx].alive {
-            return Ok(()); // crashed nodes silently swallow everything
+            return Ok(());
         }
-        let outputs = match self.nodes[idx].step(&event) {
+        let outputs = match self.nodes[idx].step(&event, self.cfg.watchdog) {
             Ok(o) => o,
             Err(NodeError::Eof(id)) => {
                 self.journal.note(self.now, "node-died", json!({ "node": id }));
@@ -117,12 +143,30 @@ impl Sim {
         for env in outputs {
             if env.dest == HARNESS {
                 self.handle_harness_message(idx, env);
-            } else {
-                self.journal.record(self.now, "send", &env);
-                let delay = self.rng.range(self.cfg.min_delay, self.cfg.max_delay + 1);
-                let at = self.now + delay;
-                self.schedule(at, Ev::Deliver(env));
+                continue;
             }
+            let Some(&to) = self.index.get(&env.dest) else {
+                self.journal.note(self.now, "unknown-destination", json!({ "dest": env.dest }));
+                continue;
+            };
+            self.journal.record(self.now, "send", &env);
+
+            let link = (idx, to);
+            let n = self.link_count.entry(link).or_insert(0);
+            *n += 1;
+            let msg_idx = *n;
+            let mut at = self.now + self.cfg.scenario.delay(idx, to, msg_idx, self.now);
+
+            // Per-link FIFO: Lamport's mutex needs it, Ricart-Agrawala does not. Turning it off is
+            // a deliberate exercise — a correct Lamport implementation breaks without it.
+            if self.cfg.scenario.fifo {
+                let prev = *self.last_sched.get(&link).unwrap_or(&0);
+                if at <= prev {
+                    at = prev + 1;
+                }
+                self.last_sched.insert(link, at);
+            }
+            self.schedule(at, Ev::Deliver { from: idx, env });
         }
         Ok(())
     }
@@ -136,7 +180,6 @@ impl Sim {
                 let at = self.now + after;
                 self.schedule(at, Ev::Timer { node: idx, timer_id });
             }
-            // Observable events the checkers will consume. M0 only records them.
             "deliver" | "enter_cs" | "exit_cs" | "leader" | "view" | "decide" => {
                 self.journal.record(self.now, "observe", &env);
             }
@@ -150,16 +193,62 @@ impl Sim {
         }
     }
 
-    pub fn run(mut self) -> Result<(), String> {
-        // Init, in node order, at t = 0.
+    fn apply_fault(&mut self, i: usize) {
+        let f = self.cfg.scenario.faults[i].clone();
+        match f {
+            Fault::Crash { node, .. } => {
+                if let Some(&idx) = self.index.get(&node) {
+                    self.journal.note(self.now, "fault-crash", json!({ "node": node }));
+                    self.nodes[idx].kill();
+                }
+            }
+            Fault::Pause { node, duration, .. } => {
+                if let Some(&idx) = self.index.get(&node) {
+                    self.paused_until[idx] = self.now + duration;
+                    self.journal.note(
+                        self.now,
+                        "fault-pause",
+                        json!({ "node": node, "until": self.now + duration }),
+                    );
+                }
+            }
+            Fault::Partition { duration, side, .. } => {
+                for m in self.partition_side.iter_mut() {
+                    *m = false;
+                }
+                for name in &side {
+                    if let Some(&idx) = self.index.get(name) {
+                        self.partition_side[idx] = true;
+                    }
+                }
+                self.partition_until = self.now + duration;
+                self.journal.note(
+                    self.now,
+                    "fault-partition",
+                    json!({ "side": side, "until": self.partition_until }),
+                );
+            }
+        }
+    }
+
+    pub fn run(mut self) -> Result<Outcome, String> {
+        for (i, f) in self.cfg.scenario.faults.iter().enumerate() {
+            let at = f.at();
+            let tiebreak = self.rng.next_u64();
+            let seq = self.seq;
+            self.seq += 1;
+            self.queue.push(Scheduled { time: at, tiebreak, seq, ev: Ev::Fault(i) });
+        }
+
         let ids: Vec<String> = self.nodes.iter().map(|n| n.id.clone()).collect();
         for i in 0..self.nodes.len() {
             let body = json!({
                 "type": "init",
                 "node_id": ids[i],
                 "node_ids": ids,
-                "n": self.cfg.node_count,
-                "f": self.cfg.f,
+                "n": self.cfg.scenario.nodes,
+                "f": self.cfg.scenario.f,
+                "gst": self.cfg.scenario.gst,
                 "provided": [],
             });
             let env = Envelope::new(HARNESS, &ids[i], body);
@@ -167,39 +256,75 @@ impl Sim {
             self.step_node(i, env)?;
         }
 
+        let mut reason = "quiescent".to_string();
         while let Some(s) = self.queue.pop() {
-            if s.time > self.cfg.time_limit {
-                self.journal.note(self.now, "time-limit", json!({ "limit": self.cfg.time_limit }));
+            if s.time > self.cfg.scenario.time_limit {
+                reason = "time-limit".into();
+                self.journal.note(
+                    self.now,
+                    "time-limit",
+                    json!({ "limit": self.cfg.scenario.time_limit }),
+                );
                 break;
             }
             self.now = s.time;
+
             match s.ev {
-                Ev::Deliver(env) => {
-                    let Some(&idx) = self.index.get(&env.dest) else {
+                Ev::Fault(i) => self.apply_fault(i),
+
+                Ev::Deliver { from, env } => {
+                    let Some(&to) = self.index.get(&env.dest) else { continue };
+
+                    // Held, not dropped: a partition that heals still delivers.
+                    if self.split_by_partition(from, to) {
+                        let at = self.partition_until;
+                        self.schedule(at, Ev::Deliver { from, env });
+                        continue;
+                    }
+                    // A paused node is alive but reacting to nothing yet.
+                    if self.now < self.paused_until[to] {
+                        let at = self.paused_until[to];
+                        self.schedule(at, Ev::Deliver { from, env });
+                        continue;
+                    }
+                    if !self.nodes[to].alive {
                         self.journal.note(
                             self.now,
-                            "unknown-destination",
+                            "drop-to-crashed",
                             json!({ "dest": env.dest }),
                         );
                         continue;
-                    };
+                    }
                     self.journal.record(self.now, "recv", &env);
-                    self.step_node(idx, env)?;
+                    self.step_node(to, env)?;
                 }
+
                 Ev::Timer { node, timer_id } => {
+                    if self.now < self.paused_until[node] {
+                        let at = self.paused_until[node];
+                        self.schedule(at, Ev::Timer { node, timer_id });
+                        continue;
+                    }
+                    if !self.nodes[node].alive {
+                        continue;
+                    }
                     let id = self.nodes[node].id.clone();
-                    let env = Envelope::new(
-                        HARNESS,
-                        &id,
-                        json!({ "type": "timer", "timer_id": timer_id }),
-                    );
+                    let env =
+                        Envelope::new(HARNESS, &id, json!({ "type": "timer", "timer_id": timer_id }));
                     self.journal.record(self.now, "timer", &env);
                     self.step_node(node, env)?;
                 }
             }
         }
 
-        self.journal.note(self.now, "end", json!({ "scheduled": self.seq }));
-        self.journal.finish().map_err(|e| e.to_string())
+        self.journal.note(
+            self.now,
+            "end",
+            json!({ "reason": reason, "scheduled": self.seq }),
+        );
+        let end_time = self.now;
+        let events = self.seq;
+        self.journal.finish().map_err(|e| e.to_string())?;
+        Ok(Outcome { ok: true, reason, end_time, events })
     }
 }
