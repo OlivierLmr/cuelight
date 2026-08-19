@@ -5,6 +5,8 @@ edition = "2021"
 description = "Deterministic discrete-event harness for the SDR distributed systems labs"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [profile.release]
 opt-level = 2
