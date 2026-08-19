@@ -1,0 +1,10 @@
+[package]
+name = "sdr-harness"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic discrete-event harness for the SDR distributed systems labs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 2
