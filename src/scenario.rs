@@ -9,6 +9,7 @@
 
 use crate::rng::Rng;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -25,6 +26,37 @@ impl Fault {
     pub fn at(&self) -> u64 {
         match self {
             Fault::Crash { at, .. } | Fault::Pause { at, .. } | Fault::Partition { at, .. } => *at,
+        }
+    }
+}
+
+/// A workload event: the harness poking a node to do something ("broadcast this", "you want the
+/// critical section", "propose this value"). Carried by the scenario so the harness itself stays
+/// lab-agnostic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Stimulus {
+    pub at: u64,
+    pub node: String,
+    pub body: Value,
+}
+
+/// Which workload to generate when expanding a seed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Workload {
+    None,
+    Broadcast,
+    Mutex,
+    Consensus,
+}
+
+impl Workload {
+    pub fn parse(s: &str) -> Result<Workload, String> {
+        match s {
+            "none" => Ok(Workload::None),
+            "broadcast" => Ok(Workload::Broadcast),
+            "mutex" => Ok(Workload::Mutex),
+            "consensus" => Ok(Workload::Consensus),
+            o => Err(format!("unknown workload {o} (none|broadcast|mutex|consensus)")),
         }
     }
 }
@@ -50,6 +82,8 @@ pub struct Scenario {
     /// can never reorder them, which would silently make `fifo` a no-op.
     pub jitter_pct: u64,
     pub faults: Vec<Fault>,
+    #[serde(default)]
+    pub stimuli: Vec<Stimulus>,
 }
 
 pub struct ExpandOpts {
@@ -59,6 +93,7 @@ pub struct ExpandOpts {
     pub fifo: bool,
     /// If false, expands a clean run with no faults.
     pub with_faults: bool,
+    pub workload: Workload,
 }
 
 impl Scenario {
@@ -94,8 +129,11 @@ impl Scenario {
                     continue;
                 }
                 crashed.push(victim);
+                // Crashes land in the first 70% of the run. A crash at 95% is untestable:
+                // Omega only promises *eventual* detection, and by late in the run its timeouts
+                // have doubled well past the time remaining.
                 faults.push(Fault::Crash {
-                    at: r.range(1, o.time_limit),
+                    at: r.range(1, o.time_limit * 7 / 10),
                     node: names[victim].clone(),
                 });
             }
@@ -105,17 +143,19 @@ impl Scenario {
                 if crashed.contains(&victim) {
                     continue;
                 }
-                faults.push(Fault::Pause {
-                    at: r.range(1, o.time_limit),
-                    node: names[victim].clone(),
-                    duration: r.range(10, 400),
-                });
+                let at = r.range(1, o.time_limit * 6 / 10);
+                faults.push(Fault::Pause { at, node: names[victim].clone(), duration: r.range(10, 400) });
             }
             if r.range(0, 2) == 1 {
                 let cut = r.range(1, n as u64) as usize;
+                // Heal well before the end. A partition still open at the time limit makes
+                // convergence checks meaningless: Omega only promises to converge once the
+                // network behaves again, so the run would end mid-disagreement.
+                let at = r.range(1, o.time_limit * 6 / 10);
+                let max_dur = (o.time_limit * 8 / 10).saturating_sub(at).max(51);
                 faults.push(Fault::Partition {
-                    at: r.range(1, o.time_limit),
-                    duration: r.range(50, 600),
+                    at,
+                    duration: r.range(50, max_dur.min(601)),
                     side: names[..cut].to_vec(),
                 });
             }
@@ -133,7 +173,48 @@ impl Scenario {
             delay_post,
             jitter_pct: 100,
             faults,
+            stimuli: Self::workload(&mut r, o, &names),
         }
+    }
+
+    fn workload(r: &mut Rng, o: &ExpandOpts, names: &[String]) -> Vec<Stimulus> {
+        let n = o.nodes as u64;
+        let mut out: Vec<Stimulus> = Vec::new();
+        match o.workload {
+            Workload::None => {}
+            Workload::Broadcast => {
+                for i in 0..r.range(3, 9) {
+                    let who = r.range(0, n) as usize;
+                    out.push(Stimulus {
+                        at: r.range(0, o.time_limit / 2),
+                        node: names[who].clone(),
+                        body: json!({ "type": "do_broadcast", "mid": format!("m{i}") }),
+                    });
+                }
+            }
+            Workload::Mutex => {
+                for _ in 0..r.range(4, 12) {
+                    let who = r.range(0, n) as usize;
+                    out.push(Stimulus {
+                        at: r.range(0, o.time_limit / 2),
+                        node: names[who].clone(),
+                        body: json!({ "type": "request_cs" }),
+                    });
+                }
+            }
+            Workload::Consensus => {
+                // Every node gets an input at t=0; binary, which is the classic hard case.
+                for name in names {
+                    out.push(Stimulus {
+                        at: 0,
+                        node: name.clone(),
+                        body: json!({ "type": "propose", "value": r.range(0, 2) }),
+                    });
+                }
+            }
+        }
+        out.sort_by_key(|s| s.at);
+        out
     }
 
     pub fn node_index(&self, name: &str) -> Option<usize> {

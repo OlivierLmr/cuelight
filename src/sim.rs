@@ -35,6 +35,7 @@ enum Ev {
     Deliver { from: usize, env: Envelope },
     Timer { node: usize, timer_id: u64 },
     Fault(usize),
+    Stimulus(usize),
 }
 
 struct Scheduled {
@@ -240,6 +241,14 @@ impl Sim {
             self.queue.push(Scheduled { time: at, tiebreak, seq, ev: Ev::Fault(i) });
         }
 
+        for (i, st) in self.cfg.scenario.stimuli.iter().enumerate() {
+            let at = st.at;
+            let tiebreak = self.rng.next_u64();
+            let seq = self.seq;
+            self.seq += 1;
+            self.queue.push(Scheduled { time: at, tiebreak, seq, ev: Ev::Stimulus(i) });
+        }
+
         let ids: Vec<String> = self.nodes.iter().map(|n| n.id.clone()).collect();
         for i in 0..self.nodes.len() {
             let body = json!({
@@ -271,6 +280,20 @@ impl Sim {
 
             match s.ev {
                 Ev::Fault(i) => self.apply_fault(i),
+
+                Ev::Stimulus(i) => {
+                    let st = self.cfg.scenario.stimuli[i].clone();
+                    let Some(&idx) = self.index.get(&st.node) else { continue };
+                    if self.now < self.paused_until[idx] {
+                        let at = self.paused_until[idx];
+                        self.schedule(at, Ev::Stimulus(i));
+                        continue;
+                    }
+                    if !self.nodes[idx].alive { continue }
+                    let env = Envelope::new(HARNESS, &st.node, st.body);
+                    self.journal.record(self.now, "stimulus", &env);
+                    self.step_node(idx, env)?;
+                }
 
                 Ev::Deliver { from, env } => {
                     let Some(&to) = self.index.get(&env.dest) else { continue };

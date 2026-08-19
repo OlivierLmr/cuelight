@@ -12,7 +12,7 @@ mod scenario;
 mod sim;
 mod viz;
 
-use scenario::{ExpandOpts, Scenario};
+use scenario::{ExpandOpts, Scenario, Workload};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -35,6 +35,7 @@ OPTIONS:
     --faults <f>       crashes tolerated             [default: 1]
     --no-faults        expand a clean run
     --fifo             per-link FIFO ordering (Lamport's mutex needs it)
+    --workload <w>     none|broadcast|mutex|consensus  [default: none]
     --time-limit <t>   logical time limit            [default: 10000]
     --watchdog <ms>    wall-clock hang detector      [default: 5000]
     --out <dir>        run directory                 [default: store/latest]
@@ -51,6 +52,7 @@ struct Args {
     f: usize,
     with_faults: bool,
     fifo: bool,
+    workload: Workload,
     time_limit: u64,
     watchdog: u64,
     out: PathBuf,
@@ -68,6 +70,7 @@ impl Default for Args {
             f: 1,
             with_faults: true,
             fifo: false,
+            workload: Workload::None,
             time_limit: 10_000,
             watchdog: 5_000,
             out: PathBuf::from("store/latest"),
@@ -99,6 +102,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--time-limit" => { a.time_limit = val(i)?.parse().map_err(|_| "bad --time-limit")?; i += 2 }
             "--watchdog" => { a.watchdog = val(i)?.parse().map_err(|_| "bad --watchdog")?; i += 2 }
             "--out" => { a.out = PathBuf::from(val(i)?); i += 2 }
+            "--workload" => { a.workload = Workload::parse(&val(i)?)?; i += 2 }
             "--no-faults" => { a.with_faults = false; i += 1 }
             "--fifo" => { a.fifo = true; i += 1 }
             other => return Err(format!("unknown option {other}")),
@@ -120,6 +124,7 @@ fn scenario_for(a: &Args, seed: u64) -> Result<Scenario, String> {
                 time_limit: a.time_limit,
                 fifo: a.fifo,
                 with_faults: a.with_faults,
+                workload: a.workload,
             },
         )),
     }
