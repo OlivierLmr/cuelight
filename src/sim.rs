@@ -312,6 +312,25 @@ impl Sim {
                 Ev::Deliver { from, env } => {
                     let Some(&to) = self.index.get(&env.dest) else { continue };
 
+                    // A crash loses the sender's still-undelivered messages.
+                    //
+                    // Without this the harness cannot express a partial broadcast, because a
+                    // node's step is atomic: it emits every send at once and they are all
+                    // scheduled, so a later crash cannot stop any of them arriving. A real
+                    // process crashing inside its send loop never hands the later messages to the
+                    // network. Since delays bound how long a message is in flight, dropping
+                    // undelivered messages from a dead sender drops exactly those from the window
+                    // before the crash — which is the partial broadcast reliable broadcast exists
+                    // to repair. Verified: without it, best-effort broadcast passes 60/60 seeds.
+                    if !self.nodes[from].alive {
+                        self.journal.note(
+                            self.now,
+                            "drop-from-crashed",
+                            json!({ "src": env.src, "dest": env.dest }),
+                        );
+                        continue;
+                    }
+
                     // Held, not dropped: a partition that heals still delivers.
                     if self.split_by_partition(from, to) {
                         let at = self.partition_until;
