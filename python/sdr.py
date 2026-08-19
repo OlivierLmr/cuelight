@@ -19,6 +19,7 @@ class Node:
         self.f = 0
         self.provided = []          # layers the harness is standing in for
         self._handlers = {}
+        self._timer_cbs = {}
         self._out = []
         self._timer_id = 0
 
@@ -39,9 +40,17 @@ class Node:
             if p != self.id:
                 self.send(p, body)
 
-    def set_timer(self, after):
-        """Fire a `timer` event after `after` units of LOGICAL time. Returns its id."""
+    def set_timer(self, after, callback=None):
+        """Fire after `after` units of LOGICAL time. Returns the timer id.
+
+        With a callback, only that callback runs when it fires — which is what lets several
+        layers (failure detector, synchronizer, ...) hold timers at once without colliding.
+        Timers cannot be cancelled; if you re-arm, guard the callback with a generation
+        counter and ignore stale firings.
+        """
         self._timer_id += 1
+        if callback is not None:
+            self._timer_cbs[self._timer_id] = callback
         self.send("harness", {"type": "set_timer",
                               "after": after,
                               "timer_id": self._timer_id})
@@ -70,9 +79,16 @@ class Node:
                 self.f = body["f"]
                 self.provided = body.get("provided", [])
 
-            handler = self._handlers.get(body["type"])
-            if handler:
-                handler(msg["src"], body)
+            if body["type"] == "timer":
+                cb = self._timer_cbs.pop(body.get("timer_id"), None)
+                if cb is not None:
+                    cb()
+                elif "timer" in self._handlers:
+                    self._handlers["timer"](msg["src"], body)
+            else:
+                handler = self._handlers.get(body["type"])
+                if handler:
+                    handler(msg["src"], body)
 
             # `done` must be last: it is the barrier that lets logical time advance.
             self.send("harness", {"type": "done"})
