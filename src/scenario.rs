@@ -61,26 +61,55 @@ impl Workload {
     }
 }
 
+fn d_nodes() -> usize { 4 }
+fn d_f() -> usize { 1 }
+fn d_gst() -> u64 { 2000 }
+fn d_limit() -> u64 { 10_000 }
+fn d_jitter() -> u64 { 100 }
+fn d_pre() -> u64 { 200 }
+fn d_post() -> u64 { 10 }
+
+/// Every field has a default, so a hand-written directed test can be as small as
+/// `{"nodes": 4, "stimuli": [...]}` — authoring one should not mean typing two n x n matrices.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scenario {
     /// Seed this was expanded from, for provenance only; replay uses the fields below.
+    #[serde(default)]
     pub seed: u64,
+    #[serde(default = "d_nodes")]
     pub nodes: usize,
+    #[serde(default = "d_f")]
     pub f: usize,
     /// Global Stabilisation Time: delays are bounded only after this.
+    ///
+    /// Note this is the *scheduled* GST. A `pause` landing after it also violates partial
+    /// synchrony, so the **effective** GST is `max(gst, end of the last pause)` — see design.md.
+    /// Checkers must date liveness deadlines from the last fault, never from this field.
+    #[serde(default = "d_gst")]
     pub gst: u64,
+    #[serde(default = "d_limit")]
     pub time_limit: u64,
     /// Per-link FIFO ordering. Lamport's mutex needs it; Ricart-Agrawala does not.
+    #[serde(default)]
     pub fifo: bool,
-    /// `delay_pre[from][to]`, used for messages sent before GST.
+    /// Used for any link the matrices below do not cover, so a hand-written scenario can omit them.
+    #[serde(default = "d_pre")]
+    pub delay_pre_default: u64,
+    #[serde(default = "d_post")]
+    pub delay_post_default: u64,
+    /// `delay_pre[from][to]`, used for messages sent before GST. May be empty.
+    #[serde(default)]
     pub delay_pre: Vec<Vec<u64>>,
+    #[serde(default)]
     pub delay_post: Vec<Vec<u64>>,
     /// Extra delay per message, as a percentage of that link's base, hashed from
     /// `(link, index-on-link)` so reordering happens without consuming the global PRNG stream.
     ///
     /// Must scale with the base: a flat jitter smaller than the gap between two messages on a link
     /// can never reorder them, which would silently make `fifo` a no-op.
+    #[serde(default = "d_jitter")]
     pub jitter_pct: u64,
+    #[serde(default)]
     pub faults: Vec<Fault>,
     #[serde(default)]
     pub stimuli: Vec<Stimulus>,
@@ -169,6 +198,8 @@ impl Scenario {
             gst,
             time_limit: o.time_limit,
             fifo: o.fifo,
+            delay_pre_default: d_pre(),
+            delay_post_default: d_post(),
             delay_pre,
             delay_post,
             jitter_pct: 100,
@@ -217,6 +248,28 @@ impl Scenario {
         out
     }
 
+    /// The point after which the model's assumptions actually hold.
+    ///
+    /// Not `self.gst`. A `pause` freezes a node for up to 400 ticks and can land after GST, which
+    /// violates partial synchrony's relative-speed clause just as surely as a slow link violates
+    /// its delay clause. A frozen node is observationally identical to one whose messages are all
+    /// slow, so the model is restored by moving GST rather than by constraining the fault.
+    /// **Liveness deadlines must be dated from here**, or correct implementations fail in the
+    /// window between `gst` and the end of the last pause.
+    pub fn effective_gst(&self) -> u64 {
+        let mut t = self.gst;
+        for f in &self.faults {
+            let end = match f {
+                Fault::Crash { at, .. } => *at,
+                Fault::Pause { at, duration, .. } | Fault::Partition { at, duration, .. } => {
+                    at + duration
+                }
+            };
+            t = t.max(end);
+        }
+        t
+    }
+
     pub fn node_index(&self, name: &str) -> Option<usize> {
         name.strip_prefix('n').and_then(|s| s.parse::<usize>().ok()).filter(|i| *i < self.nodes)
     }
@@ -226,8 +279,17 @@ impl Scenario {
     /// Jitter is hashed from `(from, to, idx)` rather than drawn from the run's PRNG, so a student
     /// changing how many messages they send does not shift every other link's timing.
     pub fn delay(&self, from: usize, to: usize, idx: u64, now: u64) -> u64 {
-        let base =
-            if now < self.gst { self.delay_pre[from][to] } else { self.delay_post[from][to] };
+        let (matrix, fallback) = if now < self.gst {
+            (&self.delay_pre, self.delay_pre_default)
+        } else {
+            (&self.delay_post, self.delay_post_default)
+        };
+        let base = matrix
+            .get(from)
+            .and_then(|row| row.get(to))
+            .copied()
+            .filter(|d| *d > 0)
+            .unwrap_or(fallback);
         let spread = base.saturating_mul(self.jitter_pct) / 100;
         if spread == 0 {
             return base.max(1);

@@ -4,6 +4,7 @@
 //! stdin/stdout; the harness owns logical time, routes every message, injects faults and checks
 //! properties. Runs replay exactly from their scenario.
 
+mod checkers;
 mod journal;
 mod node;
 mod proto;
@@ -25,6 +26,7 @@ USAGE:
     sdr-harness check  [options] --bin <cmd...>    run twice, verify identical journals
     sdr-harness sweep  [options] --bin <cmd...>    many seeds, report pass/fail
     sdr-harness viz    --journal <path> [--out <path>]
+    sdr-harness scenario [options]                 print an expanded scenario, to edit by hand
 
 OPTIONS:
     --bin <cmd...>     command launching one node (MUST BE LAST: swallows the rest of the line)
@@ -40,12 +42,14 @@ OPTIONS:
     --watchdog <ms>    wall-clock hang detector      [default: 5000]
     --out <dir>        run directory                 [default: store/latest]
     --journal <path>   viz: journal to render
+    --lab <lab1..lab4> run/sweep: check this lab's properties after each run
 ";
 
 struct Args {
     program: Vec<String>,
     scenario_path: Option<PathBuf>,
     journal: Option<PathBuf>,
+    lab: Option<String>,
     seed: u64,
     seeds: u64,
     nodes: usize,
@@ -64,6 +68,7 @@ impl Default for Args {
             program: vec![],
             scenario_path: None,
             journal: None,
+            lab: None,
             seed: 1,
             seeds: 100,
             nodes: 4,
@@ -95,6 +100,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "--scenario" => { a.scenario_path = Some(PathBuf::from(val(i)?)); i += 2 }
             "--journal" => { a.journal = Some(PathBuf::from(val(i)?)); i += 2 }
+            "--lab" => { a.lab = Some(val(i)?); i += 2 }
             "--seed" => { a.seed = val(i)?.parse().map_err(|_| "bad --seed")?; i += 2 }
             "--seeds" => { a.seeds = val(i)?.parse().map_err(|_| "bad --seeds")?; i += 2 }
             "--nodes" => { a.nodes = val(i)?.parse().map_err(|_| "bad --nodes")?; i += 2 }
@@ -149,7 +155,7 @@ fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => { eprintln!("error: {e}\n\n{USAGE}"); return ExitCode::FAILURE }
     };
-    if cmd != "viz" && a.program.is_empty() {
+    if !matches!(cmd.as_str(), "viz" | "scenario") && a.program.is_empty() {
         eprintln!("error: missing --bin\n\n{USAGE}");
         return ExitCode::FAILURE;
     }
@@ -160,13 +166,29 @@ fn main() -> ExitCode {
                 Ok(s) => s,
                 Err(e) => { eprintln!("error: {e}"); return ExitCode::FAILURE }
             };
+            let sc2 = sc.clone();
             match sim::Sim::new(config(&a, sc, a.out.clone())).and_then(|s| s.run()) {
                 Ok(o) => {
                     println!(
                         "ok — {} at t={} ({} events)\n     {}",
                         o.reason, o.end_time, o.events, a.out.display()
                     );
-                    ExitCode::SUCCESS
+                    match &a.lab {
+                        None => ExitCode::SUCCESS,
+                        Some(lab) => {
+                            match checkers::run(lab, &a.out.join("journal.jsonl"), &sc2) {
+                                Err(e) => { eprintln!("error: {e}"); ExitCode::FAILURE }
+                                Ok(rep) => {
+                                    for c in &rep.checks {
+                                        let k = if c.kind == checkers::Kind::Safety { "safety  " } else { "liveness" };
+                                        println!("  {} {k} {:<20} {}",
+                                            if c.ok { "ok  " } else { "FAIL" }, c.name, c.detail);
+                                    }
+                                    if rep.ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(e) => { eprintln!("FAILED: {e}"); ExitCode::FAILURE }
             }
@@ -209,11 +231,26 @@ fn main() -> ExitCode {
                     Err(e) => { eprintln!("error: {e}"); return ExitCode::FAILURE }
                 };
                 let dir = a.out.join("sweep").join(seed.to_string());
+                let sc2 = sc.clone();
                 match sim::Sim::new(config(&a, sc, dir.clone())).and_then(|s| s.run()) {
-                    Ok(_) => {
-                        pass += 1;
-                        let _ = std::fs::remove_dir_all(&dir); // keep only failures
-                    }
+                    Ok(_) => match &a.lab {
+                        None => {
+                            pass += 1;
+                            let _ = std::fs::remove_dir_all(&dir);
+                        }
+                        Some(lab) => match checkers::run(lab, &dir.join("journal.jsonl"), &sc2) {
+                            Ok(rep) if rep.ok() => {
+                                pass += 1;
+                                let _ = std::fs::remove_dir_all(&dir); // keep only failures
+                            }
+                            Ok(rep) => {
+                                let broken: Vec<&str> =
+                                    rep.checks.iter().filter(|c| !c.ok).map(|c| c.name).collect();
+                                fails.push((seed, broken.join(", ")));
+                            }
+                            Err(e) => fails.push((seed, e)),
+                        },
+                    },
                     Err(e) => fails.push((seed, e)),
                 }
             }
@@ -240,6 +277,12 @@ fn main() -> ExitCode {
                 Err(e) => { eprintln!("error: {e}"); ExitCode::FAILURE }
             }
         }
+
+        // Dump-to-edit: the starting point for a hand-authored directed test.
+        "scenario" => match scenario_for(&a, a.seed) {
+            Ok(sc) => { println!("{}", sc.to_json()); ExitCode::SUCCESS }
+            Err(e) => { eprintln!("error: {e}"); ExitCode::FAILURE }
+        },
 
         other => { eprintln!("unknown command {other}\n\n{USAGE}"); ExitCode::FAILURE }
     }

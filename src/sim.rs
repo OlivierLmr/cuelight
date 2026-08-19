@@ -133,10 +133,20 @@ impl Sim {
         }
         let outputs = match self.nodes[idx].step(&event, self.cfg.watchdog) {
             Ok(o) => o,
+            // Only reachable for a node the harness did NOT crash: `kill` clears `alive`, and the
+            // guard above skips dead nodes. So this is the student's process exiting on its own —
+            // a bug in their code, not an injected fault. Failing the run is the point: silently
+            // treating it as a crash would let a program that dies on a parse error pass as
+            // "correct under f=1 crashes".
             Err(NodeError::Eof(id)) => {
                 self.journal.note(self.now, "node-died", json!({ "node": id }));
                 self.nodes[idx].alive = false;
-                return Ok(());
+                return Err(format!(
+                    "node {id} exited on its own at t={} — the harness did not crash it \
+                     (check {}/{id}.stderr)",
+                    self.now,
+                    self.cfg.run_dir.display()
+                ));
             }
             Err(e) => return Err(e.to_string()),
         };
@@ -251,13 +261,17 @@ impl Sim {
 
         let ids: Vec<String> = self.nodes.iter().map(|n| n.id.clone()).collect();
         for i in 0..self.nodes.len() {
+            // Deliberately NOT sent: `gst`. Knowing it lets a node simply refuse to suspect
+            // anyone until GST has passed — a perfect failure detector with no adaptive timeout,
+            // which passes every seed and skips the whole content of lab 2. It is still in
+            // `scenario.json` in the run directory, so it stays available for debugging a trace
+            // without being reachable from inside the algorithm.
             let body = json!({
                 "type": "init",
                 "node_id": ids[i],
                 "node_ids": ids,
                 "n": self.cfg.scenario.nodes,
                 "f": self.cfg.scenario.f,
-                "gst": self.cfg.scenario.gst,
                 "provided": [],
             });
             let env = Envelope::new(HARNESS, &ids[i], body);
