@@ -24,7 +24,6 @@ pub struct Config {
 
 #[derive(Debug)]
 pub struct Outcome {
-    pub ok: bool,
     pub reason: String,
     pub end_time: u64,
     pub events: u64,
@@ -191,15 +190,13 @@ impl Sim {
                 let at = self.now + after;
                 self.schedule(at, Ev::Timer { node: idx, timer_id });
             }
-            "deliver" | "enter_cs" | "exit_cs" | "leader" | "view" | "decide" => {
+            // Anything else a node sends to the harness is an *observation*: it is recorded and
+            // that is all. Which observations mean something — `deliver`, `enter_cs`, `leader`,
+            // whatever a lab invents — is not this tool's business. It used to hold a whitelist of
+            // six names taken straight from labs 1 to 4, which is exactly the coupling that made
+            // the harness unusable for anything else.
+            _ => {
                 self.journal.record(self.now, "observe", &env);
-            }
-            other => {
-                self.journal.note(
-                    self.now,
-                    "unknown-harness-message",
-                    json!({ "node": env.src, "type": other }),
-                );
             }
         }
     }
@@ -381,6 +378,6 @@ impl Sim {
         let end_time = self.now;
         let events = self.seq;
         self.journal.finish().map_err(|e| e.to_string())?;
-        Ok(Outcome { ok: true, reason, end_time, events })
+        Ok(Outcome { reason, end_time, events })
     }
 }

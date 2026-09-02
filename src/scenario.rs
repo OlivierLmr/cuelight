@@ -40,24 +40,64 @@ pub struct Stimulus {
     pub body: Value,
 }
 
-/// Which workload to generate when expanding a seed.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Workload {
-    None,
-    Broadcast,
-    Mutex,
-    Consensus,
+/// A stimulus template, supplied by the lab — the harness ships none of its own.
+///
+/// The point of the split: `do_broadcast`, `request_cs` and `propose` are event names belonging to
+/// *some* lab, and an event-name is exactly the kind of knowledge this tool must not carry. A lab
+/// describes its workload in JSON and the harness expands it against the seed.
+///
+/// ```json
+/// { "events": [ { "count": [3, 9], "at_frac": [0.0, 0.5],
+///                 "body": { "type": "do_broadcast", "mid": "m<i>" } } ] }
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct StimulusSpec {
+    pub events: Vec<StimulusRule>,
 }
 
-impl Workload {
-    pub fn parse(s: &str) -> Result<Workload, String> {
-        match s {
-            "none" => Ok(Workload::None),
-            "broadcast" => Ok(Workload::Broadcast),
-            "mutex" => Ok(Workload::Mutex),
-            "consensus" => Ok(Workload::Consensus),
-            o => Err(format!("unknown workload {o} (none|broadcast|mutex|consensus)")),
+#[derive(Debug, Clone, Deserialize)]
+pub struct StimulusRule {
+    /// How many events to emit, drawn uniformly from `[lo, hi)`. Ignored when `per_node`.
+    #[serde(default)]
+    pub count: Option<[u64; 2]>,
+    /// One event per node instead of a drawn count. The node is not chosen at random.
+    #[serde(default)]
+    pub per_node: bool,
+    /// Absolute time window `[lo, hi)`. `lo == hi` pins the time and draws nothing.
+    #[serde(default)]
+    pub at: Option<[u64; 2]>,
+    /// Time window as a fraction of `time_limit`. Mutually exclusive with `at`.
+    #[serde(default)]
+    pub at_frac: Option<[f64; 2]>,
+    /// Message body. Strings containing `<i>` get the event index; an object `{"$rand": [lo, hi)}`
+    /// becomes a drawn integer.
+    pub body: Value,
+}
+
+impl StimulusSpec {
+    pub fn from_json(s: &str) -> Result<StimulusSpec, String> {
+        serde_json::from_str(s).map_err(|e| format!("bad stimulus spec: {e}"))
+    }
+}
+
+/// Substitute `<i>` in strings and resolve `{"$rand": [lo, hi)}` objects.
+///
+/// Draw order is depth-first over the template, so a spec expands the same way every time.
+fn render(t: &Value, i: u64, r: &mut Rng) -> Value {
+    match t {
+        Value::String(s) => Value::String(s.replace("<i>", &i.to_string())),
+        Value::Array(a) => Value::Array(a.iter().map(|v| render(v, i, r)).collect()),
+        Value::Object(o) => {
+            if let Some(Value::Array(b)) = o.get("$rand") {
+                if o.len() == 1 && b.len() == 2 {
+                    let lo = b[0].as_u64().unwrap_or(0);
+                    let hi = b[1].as_u64().unwrap_or(lo + 1);
+                    return json!(r.range(lo, hi));
+                }
+            }
+            Value::Object(o.iter().map(|(k, v)| (k.clone(), render(v, i, r))).collect())
         }
+        other => other.clone(),
     }
 }
 
@@ -122,7 +162,7 @@ pub struct ExpandOpts {
     pub fifo: bool,
     /// If false, expands a clean run with no faults.
     pub with_faults: bool,
-    pub workload: Workload,
+    pub stimuli: Option<StimulusSpec>,
 }
 
 impl Scenario {
@@ -208,70 +248,44 @@ impl Scenario {
         }
     }
 
+    /// Expand the lab's stimulus template. No template, no stimuli — the harness invents none.
+    ///
+    /// Draw order is `count`, then per event `node` then `at` then the body's `$rand`s. It is part
+    /// of the meaning of a seed: changing it would silently repoint every stored seed at a
+    /// different run.
     fn workload(r: &mut Rng, o: &ExpandOpts, names: &[String]) -> Vec<Stimulus> {
+        let Some(spec) = &o.stimuli else { return Vec::new() };
         let n = o.nodes as u64;
         let mut out: Vec<Stimulus> = Vec::new();
-        match o.workload {
-            Workload::None => {}
-            Workload::Broadcast => {
-                for i in 0..r.range(3, 9) {
-                    let who = r.range(0, n) as usize;
-                    out.push(Stimulus {
-                        at: r.range(0, o.time_limit / 2),
-                        node: names[who].clone(),
-                        body: json!({ "type": "do_broadcast", "mid": format!("m{i}") }),
-                    });
+        for rule in &spec.events {
+            let window = |r: &mut Rng| -> u64 {
+                let (lo, hi) = match (&rule.at, &rule.at_frac) {
+                    (Some([a, b]), _) => (*a, *b),
+                    (None, Some([a, b])) => (
+                        (*a * o.time_limit as f64) as u64,
+                        (*b * o.time_limit as f64) as u64,
+                    ),
+                    (None, None) => (0, 0),
+                };
+                if hi > lo { r.range(lo, hi) } else { lo }
+            };
+            if rule.per_node {
+                for (i, name) in names.iter().enumerate() {
+                    let at = window(r);
+                    out.push(Stimulus { at, node: name.clone(), body: render(&rule.body, i as u64, r) });
                 }
-            }
-            Workload::Mutex => {
-                for _ in 0..r.range(4, 12) {
+            } else {
+                let [lo, hi] = rule.count.unwrap_or([1, 2]);
+                let k = if hi > lo { r.range(lo, hi) } else { lo };
+                for i in 0..k {
                     let who = r.range(0, n) as usize;
-                    out.push(Stimulus {
-                        at: r.range(0, o.time_limit / 2),
-                        node: names[who].clone(),
-                        body: json!({ "type": "request_cs" }),
-                    });
-                }
-            }
-            Workload::Consensus => {
-                // Every node gets an input at t=0; binary, which is the classic hard case.
-                for name in names {
-                    out.push(Stimulus {
-                        at: 0,
-                        node: name.clone(),
-                        body: json!({ "type": "propose", "value": r.range(0, 2) }),
-                    });
+                    let at = window(r);
+                    out.push(Stimulus { at, node: names[who].clone(), body: render(&rule.body, i, r) });
                 }
             }
         }
         out.sort_by_key(|s| s.at);
         out
-    }
-
-    /// The point after which the model's assumptions actually hold.
-    ///
-    /// Not `self.gst`. A `pause` freezes a node for up to 400 ticks and can land after GST, which
-    /// violates partial synchrony's relative-speed clause just as surely as a slow link violates
-    /// its delay clause. A frozen node is observationally identical to one whose messages are all
-    /// slow, so the model is restored by moving GST rather than by constraining the fault.
-    /// **Liveness deadlines must be dated from here**, or correct implementations fail in the
-    /// window between `gst` and the end of the last pause.
-    pub fn effective_gst(&self) -> u64 {
-        let mut t = self.gst;
-        for f in &self.faults {
-            let end = match f {
-                Fault::Crash { at, .. } => *at,
-                Fault::Pause { at, duration, .. } | Fault::Partition { at, duration, .. } => {
-                    at + duration
-                }
-            };
-            t = t.max(end);
-        }
-        t
-    }
-
-    pub fn node_index(&self, name: &str) -> Option<usize> {
-        name.strip_prefix('n').and_then(|s| s.parse::<usize>().ok()).filter(|i| *i < self.nodes)
     }
 
     /// Delay for the `idx`-th message on link `from -> to`, sent at `now`.

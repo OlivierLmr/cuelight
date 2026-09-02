@@ -1,10 +1,12 @@
 //! SDR harness — deterministic discrete-event simulator for the distributed systems labs.
 //!
-//! The harness *is* the network. Student nodes are separate processes speaking JSON lines on
-//! stdin/stdout; the harness owns logical time, routes every message, injects faults and checks
-//! properties. Runs replay exactly from their scenario.
+//! The harness *is* the network. Nodes are separate processes speaking JSON lines on stdin/stdout;
+//! the harness owns logical time, routes every message and injects faults. Runs replay exactly
+//! from their scenario.
+//!
+//! It has **no notion of success**. It does not know what a property is, or what a lab is: it
+//! executes a scenario and writes a journal. Whoever judges that journal lives elsewhere.
 
-mod checkers;
 mod journal;
 mod node;
 mod proto;
@@ -13,7 +15,7 @@ mod scenario;
 mod sim;
 mod viz;
 
-use scenario::{ExpandOpts, Scenario, Workload};
+use scenario::{ExpandOpts, Scenario, StimulusSpec};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -24,39 +26,37 @@ sdr-harness — deterministic harness for the SDR labs
 USAGE:
     sdr-harness run    [options] --bin <cmd...>    one run
     sdr-harness check  [options] --bin <cmd...>    run twice, verify identical journals
-    sdr-harness sweep  [options] --bin <cmd...>    many seeds, report pass/fail
     sdr-harness viz    --journal <path> [--out <path>]
     sdr-harness scenario [options]                 print an expanded scenario, to edit by hand
+
+The harness executes one scenario and records what happened; it never judges. Loop over seeds
+from your own checker and point it at the journal each run writes (see JOURNAL.md).
 
 OPTIONS:
     --bin <cmd...>     command launching one node (MUST BE LAST: swallows the rest of the line)
     --scenario <path>  replay a stored scenario instead of expanding a seed
     --seed <s>         seed to expand                [default: 1]
-    --seeds <n>        sweep: how many seeds         [default: 100]
     --nodes <n>        node count                    [default: 4]
     --faults <f>       crashes tolerated             [default: 1]
     --no-faults        expand a clean run
-    --fifo             per-link FIFO ordering (Lamport's mutex needs it)
-    --workload <w>     none|broadcast|mutex|consensus  [default: none]
+    --fifo             per-link FIFO ordering (some algorithms need it)
+    --stimuli <path>   workload template to expand   [default: none]
     --time-limit <t>   logical time limit            [default: 10000]
     --watchdog <ms>    wall-clock hang detector      [default: 5000]
     --out <dir>        run directory                 [default: store/latest]
     --journal <path>   viz: journal to render
-    --lab <lab1..lab4> run/sweep: check this lab's properties after each run
 ";
 
 struct Args {
     program: Vec<String>,
     scenario_path: Option<PathBuf>,
     journal: Option<PathBuf>,
-    lab: Option<String>,
     seed: u64,
-    seeds: u64,
     nodes: usize,
     f: usize,
     with_faults: bool,
     fifo: bool,
-    workload: Workload,
+    stimuli: Option<StimulusSpec>,
     time_limit: u64,
     watchdog: u64,
     out: PathBuf,
@@ -68,14 +68,12 @@ impl Default for Args {
             program: vec![],
             scenario_path: None,
             journal: None,
-            lab: None,
             seed: 1,
-            seeds: 100,
             nodes: 4,
             f: 1,
             with_faults: true,
             fifo: false,
-            workload: Workload::None,
+            stimuli: None,
             time_limit: 10_000,
             watchdog: 5_000,
             out: PathBuf::from("store/latest"),
@@ -100,15 +98,18 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "--scenario" => { a.scenario_path = Some(PathBuf::from(val(i)?)); i += 2 }
             "--journal" => { a.journal = Some(PathBuf::from(val(i)?)); i += 2 }
-            "--lab" => { a.lab = Some(val(i)?); i += 2 }
             "--seed" => { a.seed = val(i)?.parse().map_err(|_| "bad --seed")?; i += 2 }
-            "--seeds" => { a.seeds = val(i)?.parse().map_err(|_| "bad --seeds")?; i += 2 }
             "--nodes" => { a.nodes = val(i)?.parse().map_err(|_| "bad --nodes")?; i += 2 }
             "--faults" => { a.f = val(i)?.parse().map_err(|_| "bad --faults")?; i += 2 }
             "--time-limit" => { a.time_limit = val(i)?.parse().map_err(|_| "bad --time-limit")?; i += 2 }
             "--watchdog" => { a.watchdog = val(i)?.parse().map_err(|_| "bad --watchdog")?; i += 2 }
             "--out" => { a.out = PathBuf::from(val(i)?); i += 2 }
-            "--workload" => { a.workload = Workload::parse(&val(i)?)?; i += 2 }
+            "--stimuli" => {
+                let p = val(i)?;
+                let raw = std::fs::read_to_string(&p).map_err(|e| format!("{p}: {e}"))?;
+                a.stimuli = Some(StimulusSpec::from_json(&raw)?);
+                i += 2
+            }
             "--no-faults" => { a.with_faults = false; i += 1 }
             "--fifo" => { a.fifo = true; i += 1 }
             other => return Err(format!("unknown option {other}")),
@@ -130,7 +131,7 @@ fn scenario_for(a: &Args, seed: u64) -> Result<Scenario, String> {
                 time_limit: a.time_limit,
                 fifo: a.fifo,
                 with_faults: a.with_faults,
-                workload: a.workload,
+                stimuli: a.stimuli.clone(),
             },
         )),
     }
@@ -166,29 +167,13 @@ fn main() -> ExitCode {
                 Ok(s) => s,
                 Err(e) => { eprintln!("error: {e}"); return ExitCode::FAILURE }
             };
-            let sc2 = sc.clone();
             match sim::Sim::new(config(&a, sc, a.out.clone())).and_then(|s| s.run()) {
                 Ok(o) => {
                     println!(
                         "ok — {} at t={} ({} events)\n     {}",
                         o.reason, o.end_time, o.events, a.out.display()
                     );
-                    match &a.lab {
-                        None => ExitCode::SUCCESS,
-                        Some(lab) => {
-                            match checkers::run(lab, &a.out.join("journal.jsonl"), &sc2) {
-                                Err(e) => { eprintln!("error: {e}"); ExitCode::FAILURE }
-                                Ok(rep) => {
-                                    for c in &rep.checks {
-                                        let k = if c.kind == checkers::Kind::Safety { "safety  " } else { "liveness" };
-                                        println!("  {} {k} {:<20} {}",
-                                            if c.ok { "ok  " } else { "FAIL" }, c.name, c.detail);
-                                    }
-                                    if rep.ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
-                                }
-                            }
-                        }
-                    }
+                    ExitCode::SUCCESS
                 }
                 Err(e) => { eprintln!("FAILED: {e}"); ExitCode::FAILURE }
             }
@@ -220,49 +205,6 @@ fn main() -> ExitCode {
                 eprintln!("  compare {0}/check-0 and {0}/check-1", a.out.display());
                 ExitCode::FAILURE
             }
-        }
-
-        "sweep" => {
-            let mut pass = 0u64;
-            let mut fails: Vec<(u64, String)> = vec![];
-            for seed in 1..=a.seeds {
-                let sc = match scenario_for(&a, seed) {
-                    Ok(s) => s,
-                    Err(e) => { eprintln!("error: {e}"); return ExitCode::FAILURE }
-                };
-                let dir = a.out.join("sweep").join(seed.to_string());
-                let sc2 = sc.clone();
-                match sim::Sim::new(config(&a, sc, dir.clone())).and_then(|s| s.run()) {
-                    Ok(_) => match &a.lab {
-                        None => {
-                            pass += 1;
-                            let _ = std::fs::remove_dir_all(&dir);
-                        }
-                        Some(lab) => match checkers::run(lab, &dir.join("journal.jsonl"), &sc2) {
-                            Ok(rep) if rep.ok() => {
-                                pass += 1;
-                                let _ = std::fs::remove_dir_all(&dir); // keep only failures
-                            }
-                            Ok(rep) => {
-                                let broken: Vec<&str> =
-                                    rep.checks.iter().filter(|c| !c.ok).map(|c| c.name).collect();
-                                fails.push((seed, broken.join(", ")));
-                            }
-                            Err(e) => fails.push((seed, e)),
-                        },
-                    },
-                    Err(e) => fails.push((seed, e)),
-                }
-            }
-            println!("{pass}/{} seeds passed", a.seeds);
-            for (s, e) in fails.iter().take(10) {
-                println!("  seed {s}: {e}");
-                println!("    replay: --scenario {}/sweep/{s}/scenario.json", a.out.display());
-            }
-            if fails.len() > 10 {
-                println!("  ... and {} more", fails.len() - 10);
-            }
-            if fails.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
         }
 
         "viz" => {
