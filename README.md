@@ -16,7 +16,7 @@ Each ships an `example/` node implementing reliable broadcast, which is both a w
 the template's own test:
 
 ```sh
-sdr-harness run --scenario scenarios/lab1/rb-crash-midsend.json --lab lab1 --bin <your command>
+sdr-harness run --scenario labs/lab1/scenarios/rb-crash-midsend.json --bin <your command>
 ```
 
 ## Three rules the templates enforce or assume
