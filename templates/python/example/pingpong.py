@@ -11,7 +11,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from sdr import Node                                                    # noqa: E402
+from cuelight import Node                                                    # noqa: E402
 
 ROUNDS = 5
 node = Node()

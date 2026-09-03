@@ -2,6 +2,9 @@
 
 A deterministic discrete-event simulator for distributed systems.
 
+> **On authorship.** I designed and own this project; most of the code was written by Claude under
+> my direction. Full breakdown: [Human / AI split](#human--ai-split).
+
 **cuelight is the network.** Your nodes are ordinary processes speaking JSON lines on stdin and
 stdout; cuelight owns logical time, routes every message, decides what is slow, what is lost and
 who dies — and writes down everything that happened.
@@ -190,3 +193,20 @@ right.
 `templates/` also holds the node runtime for those four languages — the event loop, the envelope
 handling and the `done` barrier, about ninety lines each. Any language that can read and write
 lines works; there is nothing else to implement.
+
+## Human / AI split
+
+| Area | Olivier | Claude |
+|---|---|---|
+| Concept and scope | The idea, and what the tool is for | Nothing |
+| Architecture and key decisions | The design, and every decision | Clarification, gaps and counter-arguments, on request |
+| Implementation (`src/`, `templates/`) | The decisions it implements, and the guarantees the runtimes had to hold | All of the code, in Rust and four client languages |
+| Tests | The approach: fuzz over seeds, determinism, replayability | The suite, and the cases that express it |
+| Documentation | The scope, reviews and corrections | Most of the writing |
+| Verification | Reviews of what's not boilerplate, and testing | Checking every claim by running it, and each test by breaking the code |
+
+**What gated a merge.** Several of these pull requests ran past a thousand lines, and I did not
+read them line by line. I read what carried the design and let the rest ride on two things. The
+tests: 22 of them, each one checked to fail when the behaviour it guards breaks, which is a stronger
+claim than "the tests pass". And use: I ran the tool and wrote a lab against it, which is where most
+of my corrections came from.

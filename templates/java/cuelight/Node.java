@@ -1,4 +1,4 @@
-package sdr;
+package cuelight;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -10,7 +10,7 @@ import java.util.Map;
 import java.util.function.BiConsumer;
 
 /**
- * Node template for the SDR distributed systems labs.
+ * Node runtime: an event loop over JSON lines on stdin and stdout.
  *
  * A node is a <em>pure event handler</em>: it receives one event, emits its outgoing messages, and
  * announces {@code done}. Same event sequence in, same actions out.

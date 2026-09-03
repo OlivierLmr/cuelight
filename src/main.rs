@@ -1,4 +1,4 @@
-//! SDR harness — deterministic discrete-event simulator for the distributed systems labs.
+//! cuelight — a deterministic discrete-event simulator for distributed systems.
 //!
 //! The harness *is* the network. Nodes are separate processes speaking JSON lines on stdin/stdout;
 //! the harness owns logical time, routes every message and injects faults. Runs replay exactly

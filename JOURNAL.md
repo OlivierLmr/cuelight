@@ -1,7 +1,7 @@
 # The journal — the harness's public interface
 
 The harness executes a scenario and writes a journal. It has **no notion of success**: it does not
-know what a property is, what a critical section is, or that labs exist. Everything that judges a
+know what a property is, or what any of your message types mean. Everything that judges a
 run reads this file.
 
 That makes the journal a contract, not an implementation detail. It is what a checker parses, what
@@ -100,6 +100,5 @@ grep '"kind":"observe"' store/latest/journal.jsonl
 cuelight viz --journal store/latest/journal.jsonl
 ```
 
-`labs/sdrcheck` is a worked reader: it loads a run directory into observations, stimuli and the
-crashed set, and computes the effective GST. A checker in any other language has only to do the
-same.
+A checker has only to load the run directory into observations, stimuli and the crashed set, and
+compute the effective GST from the scenario. Nothing else is required of it.

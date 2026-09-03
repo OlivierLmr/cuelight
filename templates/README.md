@@ -14,7 +14,7 @@ All four are verified against the same scenarios and produce identical results:
 |---|---|---|
 | Python | — | none |
 | Go | `go build ./...` | none (stdlib `encoding/json`) |
-| Java | `javac -d out sdr/*.java example/Main.java` | none — a minimal JSON reader is included so no build tooling is needed |
+| Java | `javac -d out cuelight/*.java example/Main.java` | none — a minimal JSON reader is included so no build tooling is needed |
 | C++ | `c++ -std=c++17 -O2 -o example example/main.cpp` | none, header-only |
 
 Each ships an `example/` node playing **ping-pong**: n0 pings the next node around the ring, which
@@ -49,7 +49,7 @@ the template's own test: if your language's plumbing is right, you get exactly t
 ## Timers
 
 `set_timer(after, callback)` takes a **per-timer callback**, not one global handler. Ω holds a timer
-per peer, the synchronizer one per view, the mutex one for the critical section — they must not
+one per peer, one per round, one per pending request — they must not
 collide.
 
 Timers **cannot be cancelled**. If you re-arm one, guard the callback with a generation counter and

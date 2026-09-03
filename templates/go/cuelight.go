@@ -1,11 +1,11 @@
-// Package sdr is the node template for the SDR distributed systems labs.
+// Package cuelight is the node runtime: an event loop over JSON lines on stdin and stdout.
 //
 // A node is a *pure event handler*: it receives one event, emits its outgoing messages, and
 // announces `done`. Same event sequence in, same actions out.
 //
 // Do not use wall-clock time, goroutines, or unseeded randomness — replay depends on determinism,
 // and the harness will detect and report violations as your bug. Your process must never exit.
-package sdr
+package cuelight
 
 import (
 	"bufio"

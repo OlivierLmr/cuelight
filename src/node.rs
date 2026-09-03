@@ -29,7 +29,8 @@ pub struct Node {
 
 #[derive(Debug)]
 pub enum NodeError {
-    Spawn(std::io::Error),
+    /// Carries the command, because the message is only useful if it names what failed.
+    Spawn(std::io::Error, String),
     /// Exited or closed stdout before emitting `done`.
     Eof(String),
     /// Produced nothing for the watchdog interval — almost always a missing `done` or a loop.
@@ -41,7 +42,24 @@ pub enum NodeError {
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NodeError::Spawn(e) => write!(f, "could not spawn node: {e}"),
+            NodeError::Spawn(e, cmd) => {
+                write!(f, "could not spawn node: {e}\n  command: {cmd}")?;
+                // Two failures dominate here, and both have one obvious cause. Naming it costs
+                // nothing and saves the reader from guessing at an errno.
+                match e.kind() {
+                    std::io::ErrorKind::PermissionDenied => write!(
+                        f,
+                        "\n  hint: the file is not executable. Either `chmod +x` it, or name the \
+                         interpreter — `--bin python3 node.py` rather than `--bin node.py`."
+                    ),
+                    std::io::ErrorKind::NotFound => write!(
+                        f,
+                        "\n  hint: no such command. `--bin` must be last: it swallows the rest of \
+                         the line, so anything after it is the node's own arguments."
+                    ),
+                    _ => Ok(()),
+                }
+            }
             NodeError::Eof(id) => write!(f, "node {id} closed its output before emitting `done`"),
             NodeError::Hung(id) => write!(
                 f,
@@ -56,15 +74,16 @@ impl std::fmt::Display for NodeError {
 
 impl Node {
     pub fn spawn(id: &str, program: &[String], log_dir: &Path) -> Result<Node, NodeError> {
+        let cmd = program.join(" ");
         let stderr = std::fs::File::create(log_dir.join(format!("{id}.stderr")))
-            .map_err(NodeError::Spawn)?;
+            .map_err(|e| NodeError::Spawn(e, cmd.clone()))?;
         let mut child = Command::new(&program[0])
             .args(&program[1..])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr))
             .spawn()
-            .map_err(NodeError::Spawn)?;
+            .map_err(|e| NodeError::Spawn(e, cmd))?;
 
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
