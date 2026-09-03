@@ -2,7 +2,7 @@
 """Fixture: n0 blasts numbered messages at n1 in one event, so link jitter can reorder them.
 n1 reports the order they arrive in."""
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "templates", "python"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "templates", "python"))
 from sdr import Node                                                    # noqa: E402
 
 node = Node()
