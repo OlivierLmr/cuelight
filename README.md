@@ -170,12 +170,12 @@ cuelight scenario [options]                 print an expanded scenario, to edit 
 
 ## A complete example
 
-`../templates/*/example/` holds the same ping-pong node in Python, Go, Java and C++: n0 pings the
+`templates/*/example/` holds the same ping-pong node in Python, Go, Java and C++: n0 pings the
 next node around the ring, which pongs back, five times. It exercises handler registration, `send`,
 `set_timer` with a callback and `observe`, and is about forty lines.
 
 ```sh
-cuelight run --seed 1 --no-faults --bin python3 ../templates/python/example/pingpong.py
+cuelight run --seed 1 --no-faults --bin python3 templates/python/example/pingpong.py
 grep '"kind":"observe"' store/latest/journal.jsonl
 ```
 
@@ -187,6 +187,6 @@ grep '"kind":"observe"' store/latest/journal.jsonl
 All four languages produce that trace character for character. If yours does too, your plumbing is
 right.
 
-`../templates/` also holds the node runtime for those four languages — the event loop, the envelope
+`templates/` also holds the node runtime for those four languages — the event loop, the envelope
 handling and the `done` barrier, about ninety lines each. Any language that can read and write
 lines works; there is nothing else to implement.

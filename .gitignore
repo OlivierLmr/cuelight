@@ -1,0 +1,6 @@
+target/
+store/
+out/
+__pycache__/
+*.class
+.DS_Store
