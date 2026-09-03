@@ -212,10 +212,6 @@ public:
         out_.push_back(std::move(e));
     }
 
-    void broadcast(const Json& body) {
-        for (auto& p : peers) if (p != id) send(p, body);
-    }
-
     // Fires after `after` units of LOGICAL time. With a callback, only that callback runs, which
     // is what lets several layers hold timers at once. Timers cannot be cancelled: if you re-arm,
     // guard the callback with a generation counter and ignore stale firings.

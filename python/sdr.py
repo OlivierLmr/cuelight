@@ -35,11 +35,6 @@ class Node:
     def send(self, dest, body):
         self._out.append({"src": self.id, "dest": dest, "body": body})
 
-    def broadcast(self, body):
-        for p in self.peers:
-            if p != self.id:
-                self.send(p, body)
-
     def set_timer(self, after, callback=None):
         """Fire after `after` units of LOGICAL time. Returns the timer id.
 

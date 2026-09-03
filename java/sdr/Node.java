@@ -40,10 +40,6 @@ public class Node {
         out.add(e);
     }
 
-    public void broadcast(Map<String, Object> body) {
-        for (String p : peers) if (!p.equals(id)) send(p, body);
-    }
-
     /**
      * Fire after {@code after} units of LOGICAL time; returns the timer id.
      *

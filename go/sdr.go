@@ -47,14 +47,6 @@ func (n *Node) Send(dest string, b Body) {
 	n.out = append(n.out, envelope{Src: n.ID, Dest: dest, Body: b})
 }
 
-func (n *Node) Broadcast(b Body) {
-	for _, p := range n.Peers {
-		if p != n.ID {
-			n.Send(p, b)
-		}
-	}
-}
-
 // SetTimer fires after `after` units of LOGICAL time and returns the timer id.
 //
 // With a callback, only that callback runs when it fires — which is what lets several layers hold
