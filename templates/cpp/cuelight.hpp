@@ -1,4 +1,4 @@
-// Node template for the SDR distributed systems labs. Header-only, no dependencies.
+// Node runtime: an event loop over JSON lines on stdin and stdout. Header-only, no dependencies.
 //
 // A node is a *pure event handler*: it receives one event, emits its outgoing messages, and
 // announces `done`. Same event sequence in, same actions out.
@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-namespace sdr {
+namespace cuelight {
 
 // ---------------------------------------------------------------- JSON ----
 // Object keys keep insertion order, which keeps emitted lines stable and readable.
@@ -284,4 +284,4 @@ private:
     int timer_id_ = 0;
 };
 
-}  // namespace sdr
+}  // namespace cuelight

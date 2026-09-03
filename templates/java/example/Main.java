@@ -4,9 +4,9 @@
 // every part of the template — handlers, send, setTimer with a callback, observe — and deliberately
 // implements no algorithm from any lab.
 //
-//   javac -d out sdr/*.java example/Main.java
+//   javac -d out cuelight/*.java example/Main.java
 //   cuelight run --seed 1 --bin java -cp out Main
-import sdr.Node;
+import cuelight.Node;
 
 public class Main {
     static final int ROUNDS = 5;

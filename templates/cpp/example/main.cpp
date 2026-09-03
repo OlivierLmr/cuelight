@@ -6,10 +6,10 @@
 //
 //   c++ -std=c++17 -O2 -o example example/main.cpp
 //   cuelight run --seed 1 --bin ./example
-#include "../sdr.hpp"
+#include "../cuelight.hpp"
 
 int main() {
-    sdr::Node node;
+    cuelight::Node node;
     int sent = 0;
     const int rounds = 5;
 
@@ -22,31 +22,31 @@ int main() {
     std::function<void()> ping = [&]() {
         if (sent >= rounds) return;
         sent++;
-        sdr::Json m = sdr::Json::object();
-        m["type"] = sdr::Json("ping");
-        m["n"] = sdr::Json(sent);
+        cuelight::Json m = cuelight::Json::object();
+        m["type"] = cuelight::Json("ping");
+        m["n"] = cuelight::Json(sent);
         node.send(other(), m);
     };
 
     // Only the first node starts, so the ring carries exactly one token.
-    node.on("init", [&](const std::string&, const sdr::Json&) {
+    node.on("init", [&](const std::string&, const cuelight::Json&) {
         if (node.id == node.peers.front()) node.set_timer(10, ping);
     });
-    node.on("ping", [&](const std::string& src, const sdr::Json& b) {
-        sdr::Json o = sdr::Json::object();
-        o["type"] = sdr::Json("saw_ping");
-        o["n"] = sdr::Json(b.find("n")->as_int());
-        o["from"] = sdr::Json(src);
+    node.on("ping", [&](const std::string& src, const cuelight::Json& b) {
+        cuelight::Json o = cuelight::Json::object();
+        o["type"] = cuelight::Json("saw_ping");
+        o["n"] = cuelight::Json(b.find("n")->as_int());
+        o["from"] = cuelight::Json(src);
         node.observe(o);
-        sdr::Json p = sdr::Json::object();
-        p["type"] = sdr::Json("pong");
-        p["n"] = sdr::Json(b.find("n")->as_int());
+        cuelight::Json p = cuelight::Json::object();
+        p["type"] = cuelight::Json("pong");
+        p["n"] = cuelight::Json(b.find("n")->as_int());
         node.send(src, p);
     });
-    node.on("pong", [&](const std::string&, const sdr::Json& b) {
-        sdr::Json o = sdr::Json::object();
-        o["type"] = sdr::Json("saw_pong");
-        o["n"] = sdr::Json(b.find("n")->as_int());
+    node.on("pong", [&](const std::string&, const cuelight::Json& b) {
+        cuelight::Json o = cuelight::Json::object();
+        o["type"] = cuelight::Json("saw_pong");
+        o["n"] = cuelight::Json(b.find("n")->as_int());
         node.observe(o);
         node.set_timer(20, ping);
     });

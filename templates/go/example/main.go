@@ -7,12 +7,12 @@
 //	go build -o example ./example && cuelight run --seed 1 --bin ./example
 package main
 
-import "sdr"
+import "cuelight"
 
 const rounds = 5
 
 func main() {
-	node := sdr.New()
+	node := cuelight.New()
 	sent := 0
 
 	other := func() string {
@@ -30,21 +30,21 @@ func main() {
 			return
 		}
 		sent++
-		node.Send(other(), sdr.Body{"type": "ping", "n": sent})
+		node.Send(other(), cuelight.Body{"type": "ping", "n": sent})
 	}
 
 	// Only the first node starts, so the ring carries exactly one token.
-	node.On("init", func(src string, b sdr.Body) {
+	node.On("init", func(src string, b cuelight.Body) {
 		if node.ID == node.Peers[0] {
 			node.SetTimer(10, ping)
 		}
 	})
-	node.On("ping", func(src string, b sdr.Body) {
-		node.Observe(sdr.Body{"type": "saw_ping", "n": b["n"], "from": src})
-		node.Send(src, sdr.Body{"type": "pong", "n": b["n"]})
+	node.On("ping", func(src string, b cuelight.Body) {
+		node.Observe(cuelight.Body{"type": "saw_ping", "n": b["n"], "from": src})
+		node.Send(src, cuelight.Body{"type": "pong", "n": b["n"]})
 	})
-	node.On("pong", func(src string, b sdr.Body) {
-		node.Observe(sdr.Body{"type": "saw_pong", "n": b["n"]})
+	node.On("pong", func(src string, b cuelight.Body) {
+		node.Observe(cuelight.Body{"type": "saw_pong", "n": b["n"]})
 		node.SetTimer(20, ping)
 	})
 

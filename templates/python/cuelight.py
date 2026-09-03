@@ -1,4 +1,4 @@
-"""Minimal SDR node template.
+"""Minimal node runtime for cuelight.
 
 A node is a *pure event handler*: it receives one event, emits its outgoing messages, and
 announces `done`. Same event sequence in, same actions out.
@@ -39,7 +39,7 @@ class Node:
         """Fire after `after` units of LOGICAL time. Returns the timer id.
 
         With a callback, only that callback runs when it fires — which is what lets several
-        layers (failure detector, synchronizer, ...) hold timers at once without colliding.
+        layers hold timers at once without colliding.
         Timers cannot be cancelled; if you re-arm, guard the callback with a generation
         counter and ignore stale firings.
         """

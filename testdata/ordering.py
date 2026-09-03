@@ -3,7 +3,7 @@
 n1 reports the order they arrive in."""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "templates", "python"))
-from sdr import Node                                                    # noqa: E402
+from cuelight import Node                                                    # noqa: E402
 
 node = Node()
 
