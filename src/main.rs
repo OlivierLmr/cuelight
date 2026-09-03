@@ -21,13 +21,13 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 const USAGE: &str = "\
-sdr-harness — deterministic harness for the SDR labs
+cuelight — a deterministic discrete-event simulator for distributed systems
 
 USAGE:
-    sdr-harness run    [options] --bin <cmd...>    one run
-    sdr-harness check  [options] --bin <cmd...>    run twice, verify identical journals
-    sdr-harness viz    --journal <path> [--out <path>]
-    sdr-harness scenario [options]                 print an expanded scenario, to edit by hand
+    cuelight run    [options] --bin <cmd...>    one run
+    cuelight check  [options] --bin <cmd...>    run twice, verify identical journals
+    cuelight viz    --journal <path> [--out <path>]
+    cuelight scenario [options]                 print an expanded scenario, to edit by hand
 
 The harness executes one scenario and records what happened; it never judges. Loop over seeds
 from your own checker and point it at the journal each run writes (see JOURNAL.md).

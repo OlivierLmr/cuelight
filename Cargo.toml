@@ -1,8 +1,8 @@
 [package]
-name = "sdr-harness"
+name = "cuelight"
 version = "0.1.0"
 edition = "2021"
-description = "Deterministic discrete-event harness for the SDR distributed systems labs"
+description = "Deterministic discrete-event simulator for distributed systems: the network, the clock and the faults"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
