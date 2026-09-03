@@ -3,7 +3,7 @@
 // A node is a *pure event handler*: it receives one event, emits its outgoing messages, and
 // announces `done`. Same event sequence in, same actions out.
 //
-// Do not use wall-clock time, threads, or unseeded randomness — replay depends on determinism and
+// Do not use wall-clock time, threads, or unseeded randomness. Replay depends on determinism and
 // the harness reports violations as your bug. Your process must never exit.
 #pragma once
 

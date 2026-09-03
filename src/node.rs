@@ -7,7 +7,7 @@
 //! ## The watchdog and wall-clock time
 //!
 //! Reading is delegated to a thread so that a node which hangs (infinite loop, forgotten `done`)
-//! can be detected instead of blocking the harness forever. That check uses *wall-clock* time —
+//! can be detected instead of blocking the harness forever. That check uses *wall-clock* time,
 //! the only wall-clock in the system. It is sound because it can only ever turn a run that would
 //! have hung into a reported failure: a run that completes is unaffected, so determinism of
 //! successful runs is preserved.
@@ -33,7 +33,7 @@ pub enum NodeError {
     Spawn(std::io::Error, String),
     /// Exited or closed stdout before emitting `done`.
     Eof(String),
-    /// Produced nothing for the watchdog interval — almost always a missing `done` or a loop.
+    /// Produced nothing for the watchdog interval: almost always a missing `done` or a loop.
     Hung(String),
     Io(std::io::Error),
     Json(String, String),
@@ -50,7 +50,7 @@ impl std::fmt::Display for NodeError {
                     std::io::ErrorKind::PermissionDenied => write!(
                         f,
                         "\n  hint: the file is not executable. Either `chmod +x` it, or name the \
-                         interpreter — `--bin python3 node.py` rather than `--bin node.py`."
+                         interpreter: `--bin python3 node.py` rather than `--bin node.py`."
                     ),
                     std::io::ErrorKind::NotFound => write!(
                         f,

@@ -15,7 +15,7 @@ import java.util.function.BiConsumer;
  * A node is a <em>pure event handler</em>: it receives one event, emits its outgoing messages, and
  * announces {@code done}. Same event sequence in, same actions out.
  *
- * Do not use wall-clock time, threads, or unseeded randomness — replay depends on determinism and
+ * Do not use wall-clock time, threads, or unseeded randomness. Replay depends on determinism and
  * the harness reports violations as your bug. Your process must never exit.
  */
 public class Node {
@@ -43,7 +43,7 @@ public class Node {
     /**
      * Fire after {@code after} units of LOGICAL time; returns the timer id.
      *
-     * With a callback, only that callback runs — which is what lets several layers hold timers at
+     * With a callback, only that callback runs, which is what lets several layers hold timers at
      * once. Timers cannot be cancelled: if you re-arm, guard the callback with a generation counter
      * and ignore stale firings.
      */

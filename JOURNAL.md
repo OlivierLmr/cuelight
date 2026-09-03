@@ -1,4 +1,4 @@
-# The journal — the harness's public interface
+# The journal: the harness's public interface
 
 The harness executes a scenario and writes a journal. It has **no notion of success**: it does not
 know what a property is, or what any of your message types mean. Everything that judges a
@@ -13,12 +13,12 @@ Every run writes a directory (`--out`, default `store/latest`):
 
 | File | Contents |
 |---|---|
-| `journal.jsonl` | this format — one JSON object per line, in `seq` order |
+| `journal.jsonl` | this format: one JSON object per line, in `seq` order |
 | `scenario.json` | the scenario exactly as replayed, including the faults it scheduled |
 | `n<i>.stderr` | each node's standard error, untouched |
 
 A checker generally needs both `journal.jsonl` and `scenario.json`: the journal says what happened,
-the scenario says what was *supposed* to happen — which nodes existed, when the network was allowed
+the scenario says what was *supposed* to happen: which nodes existed, when the network was allowed
 to misbehave, and when it stopped.
 
 ## Every line
@@ -32,7 +32,7 @@ Two shapes. Both always carry `seq`, `t` and `kind`.
 
 | Field | Meaning |
 |---|---|
-| `seq` | the harness's own ordering, dense from 0. Independent of scheduling — two events at the same `t` are still totally ordered |
+| `seq` | the harness's own ordering, dense from 0. Independent of scheduling, so two events at the same `t` are still totally ordered |
 | `t` | **logical** time. Never wall-clock. Non-decreasing along `seq` |
 | `kind` | which of the entries below |
 | `src`, `dest`, `body` | message-shaped entries: an envelope exactly as it travelled |
@@ -54,7 +54,7 @@ wall-clock, no pids, no absolute paths. That is what makes `check` meaningful.
 | `timer` | that timer fires | |
 
 `observe` is where properties are read from. The harness does not know or care what an observation
-means — `deliver`, `enter_cs`, `leader`, or anything a future lab invents. It records the body
+means, whether `deliver`, `enter_cs`, `leader`, or anything a future lab invents. It records the body
 verbatim and moves on.
 
 `done` is **not** journalled. It is the barrier that lets logical time advance, not an event.
@@ -68,7 +68,7 @@ verbatim and moves on.
 | `fault-partition` | `side`, `until` | the network split; `side` lists one half |
 | `drop-to-crashed` | `dest` | a message was discarded because its target was dead |
 | `drop-from-crashed` | `src`, `dest` | a still-in-flight message was discarded because its **sender** died |
-| `node-died` | `node` | a node exited **on its own**. The harness did not do this — the run has failed |
+| `node-died` | `node` | a node exited **on its own**. The harness did not do this, and the run has failed |
 | `unknown-destination` | `dest` | a node addressed something that is not a node or `harness` |
 | `time-limit` | `limit` | the run was cut off rather than settling |
 | `end` | `reason`, `scheduled` | always last. `reason` is `quiescent`, `time-limit`, or a failure |
@@ -81,7 +81,7 @@ best-effort broadcast looks reliable.
 
 **Date liveness from the last fault, never from `gst`.** `scenario.json` carries a scheduled `gst`,
 but a pause landing after it also violates partial synchrony. The effective GST is
-`max(gst, end of the last fault)` — the end of a `Pause` or `Partition` is `at + duration`, of a
+`max(gst, end of the last fault)`. The end of a `Pause` or `Partition` is `at + duration`, of a
 `Crash` its `at`. A deadline dated from `gst` fails correct implementations.
 
 **State properties over the nodes that never crashed.** Take `nodes` from `scenario.json`, remove

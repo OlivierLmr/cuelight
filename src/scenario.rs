@@ -2,7 +2,7 @@
 //!
 //! Deliberately *not* "a seed". Student code changes between runs, so a seed would be consumed
 //! differently and the same seed would replay a different run. A scenario pins everything the
-//! harness controls — GST, per-link delays, the fault schedule — so it replays against any version
+//! harness controls (GST, per-link delays, the fault schedule), so it replays against any version
 //! of their code, can be shrunk, and can be pasted into a bug report.
 //!
 //! A seed *expands* into a scenario deterministically; the scenario is what gets stored.
@@ -40,7 +40,7 @@ pub struct Stimulus {
     pub body: Value,
 }
 
-/// A stimulus template, supplied by the lab — the harness ships none of its own.
+/// A stimulus template, supplied by the lab. The harness ships none of its own.
 ///
 /// The point of the split: `do_broadcast`, `request_cs` and `propose` are event names belonging to
 /// *some* lab, and an event-name is exactly the kind of knowledge this tool must not carry. A lab
@@ -110,7 +110,7 @@ fn d_pre() -> u64 { 200 }
 fn d_post() -> u64 { 10 }
 
 /// Every field has a default, so a hand-written directed test can be as small as
-/// `{"nodes": 4, "stimuli": [...]}` — authoring one should not mean typing two n x n matrices.
+/// `{"nodes": 4, "stimuli": [...]}`, because authoring one should not mean typing two n x n matrices.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scenario {
     /// Seed this was expanded from, for provenance only; replay uses the fields below.
@@ -123,7 +123,7 @@ pub struct Scenario {
     /// Global Stabilisation Time: delays are bounded only after this.
     ///
     /// Note this is the *scheduled* GST. A `pause` landing after it also violates partial
-    /// synchrony, so the **effective** GST is `max(gst, end of the last pause)` — see design.md.
+    /// synchrony, so the **effective** GST is `max(gst, end of the last pause)`. See design.md.
     /// Checkers must date liveness deadlines from the last fault, never from this field.
     #[serde(default = "d_gst")]
     pub gst: u64,
@@ -189,7 +189,7 @@ impl Scenario {
 
         let mut faults = Vec::new();
         if o.with_faults {
-            // At most f crashes — the model's whole premise.
+            // At most f crashes: the model's whole premise.
             let crashes = r.range(0, (o.f + 1) as u64) as usize;
             let mut crashed: Vec<usize> = Vec::new();
             for _ in 0..crashes {
@@ -248,7 +248,7 @@ impl Scenario {
         }
     }
 
-    /// Expand the lab's stimulus template. No template, no stimuli — the harness invents none.
+    /// Expand the lab's stimulus template. No template, no stimuli: the harness invents none.
     ///
     /// Draw order is `count`, then per event `node` then `at` then the body's `$rand`s. It is part
     /// of the meaning of a seed: changing it would silently repoint every stored seed at a

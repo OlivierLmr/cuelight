@@ -1,7 +1,7 @@
 // Ping-pong: the smallest program that exercises the whole interface.
 //
 // n0 pings the next node around the ring, which pongs back, for a fixed number of rounds. It uses
-// every part of the template — handlers, send, set_timer with a callback, observe — and
+// every part of the template: handlers, send, set_timer with a callback, observe. It
 // deliberately implements no algorithm from any lab.
 //
 //   c++ -std=c++17 -O2 -o example example/main.cpp
