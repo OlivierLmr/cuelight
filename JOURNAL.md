@@ -97,7 +97,7 @@ grep -o '"kind":"[a-z-]*"' store/latest/journal.jsonl | sort | uniq -c
 grep '"kind":"observe"' store/latest/journal.jsonl
 
 # a sequence diagram of the messages
-sdr-harness viz --journal store/latest/journal.jsonl
+cuelight viz --journal store/latest/journal.jsonl
 ```
 
 `labs/sdrcheck` is a worked reader: it loads a run directory into observations, stimuli and the
