@@ -2,16 +2,23 @@
 """Harness test fixture: exercises init, send, broadcast, timers and observable events."""
 
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "templates", "python"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "templates", "python"))
 from sdr import Node                                                    # noqa: E402
 
 node = Node()
 state = {"rounds": 0, "acks": 0}
 
 
+def hello():
+    # The runtime provides no broadcast: whether "everyone" includes you is the caller's decision.
+    for p in node.peers:
+        if p != node.id:
+            node.send(p, {"type": "hello"})
+
+
 @node.on("init")
 def _(src, body):
-    node.broadcast({"type": "hello"})
+    hello()
     node.set_timer(50)
 
 
@@ -30,7 +37,7 @@ def _(src, body):
 def _(src, body):
     if state["rounds"] < 3:
         state["rounds"] += 1
-        node.broadcast({"type": "hello"})
+        hello()
         node.set_timer(50)
 
 
