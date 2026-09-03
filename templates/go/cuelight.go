@@ -3,7 +3,7 @@
 // A node is a *pure event handler*: it receives one event, emits its outgoing messages, and
 // announces `done`. Same event sequence in, same actions out.
 //
-// Do not use wall-clock time, goroutines, or unseeded randomness — replay depends on determinism,
+// Do not use wall-clock time, goroutines, or unseeded randomness. Replay depends on determinism,
 // and the harness will detect and report violations as your bug. Your process must never exit.
 package cuelight
 
@@ -49,7 +49,7 @@ func (n *Node) Send(dest string, b Body) {
 
 // SetTimer fires after `after` units of LOGICAL time and returns the timer id.
 //
-// With a callback, only that callback runs when it fires — which is what lets several layers hold
+// With a callback, only that callback runs when it fires, which is what lets several layers hold
 // timers at once. Timers cannot be cancelled: if you re-arm, guard the callback with a generation
 // counter and ignore stale firings.
 func (n *Node) SetTimer(after int, cb func()) int {

@@ -52,7 +52,7 @@ impl Ord for Scheduled {
     /// Reversed: `BinaryHeap` is a max-heap and we want the earliest event first.
     ///
     /// `tiebreak` is drawn from the PRNG at insertion, so events landing at the same instant are
-    /// ordered by the seed rather than by insertion order — without this a sweep would re-explore
+    /// ordered by the seed rather than by insertion order. Without this a sweep would re-explore
     /// a single interleaving forever. `seq` only breaks exact tiebreak collisions.
     fn cmp(&self, o: &Self) -> Ordering {
         o.time.cmp(&self.time)
@@ -133,7 +133,7 @@ impl Sim {
         let outputs = match self.nodes[idx].step(&event, self.cfg.watchdog) {
             Ok(o) => o,
             // Only reachable for a node the harness did NOT crash: `kill` clears `alive`, and the
-            // guard above skips dead nodes. So this is the student's process exiting on its own —
+            // guard above skips dead nodes. So this is the student's process exiting on its own,
             // a bug in their code, not an injected fault. Failing the run is the point: silently
             // treating it as a crash would let a program that dies on a parse error pass as
             // "correct under f=1 crashes".
@@ -141,7 +141,7 @@ impl Sim {
                 self.journal.note(self.now, "node-died", json!({ "node": id }));
                 self.nodes[idx].alive = false;
                 return Err(format!(
-                    "node {id} exited on its own at t={} — the harness did not crash it \
+                    "node {id} exited on its own at t={}. The harness did not crash it \
                      (check {}/{id}.stderr)",
                     self.now,
                     self.cfg.run_dir.display()
@@ -168,7 +168,7 @@ impl Sim {
             let mut at = self.now + self.cfg.scenario.delay(idx, to, msg_idx, self.now);
 
             // Per-link FIFO: Lamport's mutex needs it, Ricart-Agrawala does not. Turning it off is
-            // a deliberate exercise — a correct Lamport implementation breaks without it.
+            // a deliberate exercise: a correct Lamport implementation breaks without it.
             if self.cfg.scenario.fifo {
                 let prev = *self.last_sched.get(&link).unwrap_or(&0);
                 if at <= prev {
@@ -191,8 +191,8 @@ impl Sim {
                 self.schedule(at, Ev::Timer { node: idx, timer_id });
             }
             // Anything else a node sends to the harness is an *observation*: it is recorded and
-            // that is all. Which observations mean something — `deliver`, `enter_cs`, `leader`,
-            // whatever a lab invents — is not this tool's business. It used to hold a whitelist of
+            // that is all. Which observations mean something, whether `deliver`, `enter_cs`, `leader`
+            // or whatever a lab invents, is not this tool's business. It used to hold a whitelist of
             // six names taken straight from labs 1 to 4, which is exactly the coupling that made
             // the harness unusable for anything else.
             _ => {
@@ -259,7 +259,7 @@ impl Sim {
         let ids: Vec<String> = self.nodes.iter().map(|n| n.id.clone()).collect();
         for i in 0..self.nodes.len() {
             // Deliberately NOT sent: `gst`. Knowing it lets a node simply refuse to suspect
-            // anyone until GST has passed — a perfect failure detector with no adaptive timeout,
+            // anyone until GST has passed: a perfect failure detector with no adaptive timeout,
             // which passes every seed and skips the whole content of lab 2. It is still in
             // `scenario.json` in the run directory, so it stays available for debugging a trace
             // without being reachable from inside the algorithm.
@@ -317,7 +317,7 @@ impl Sim {
                     // process crashing inside its send loop never hands the later messages to the
                     // network. Since delays bound how long a message is in flight, dropping
                     // undelivered messages from a dead sender drops exactly those from the window
-                    // before the crash — which is the partial broadcast reliable broadcast exists
+                    // before the crash, which is the partial broadcast reliable broadcast exists
                     // to repair. Verified: without it, best-effort broadcast passes 60/60 seeds.
                     if !self.nodes[from].alive {
                         self.journal.note(

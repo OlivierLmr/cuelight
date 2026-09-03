@@ -1,7 +1,7 @@
 // Ping-pong: the smallest program that exercises the whole interface.
 //
 // n0 pings the next node around the ring, which pongs back, for a fixed number of rounds. It uses
-// every part of the template — handlers, send, setTimer with a callback, observe — and deliberately
+// every part of the template: handlers, send, setTimer with a callback, observe. It deliberately
 // implements no algorithm from any lab.
 //
 //   javac -d out cuelight/*.java example/Main.java

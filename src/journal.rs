@@ -1,4 +1,4 @@
-//! Totally ordered event log — the artefact the determinism check diffs.
+//! Totally ordered event log: the artefact the determinism check diffs.
 //!
 //! Must contain nothing that varies between runs: no wall-clock, no pids, no absolute paths.
 //! Logical time only.

@@ -1,6 +1,6 @@
 //! End-to-end tests: the real binary, real node processes, real journals.
 //!
-//! Everything here goes through `cuelight` the way a user does — no internals. The fixtures in
+//! Everything here goes through `cuelight` the way a user does, never its internals. The fixtures in
 //! `testdata/` are Python nodes, so these are skipped when python3 is unavailable rather than
 //! failing someone who is only touching the Rust.
 
@@ -75,7 +75,7 @@ fn check_reports_determinism() {
     assert!(String::from_utf8_lossy(&o.stdout).contains("DETERMINISTIC"));
 }
 
-/// `--fifo` must actually order the link, and its absence must actually reorder — otherwise the
+/// `--fifo` must actually order the link, and its absence must actually reorder. Otherwise the
 /// flag could be a silent no-op and Lamport's mutex would appear to work without ordered channels.
 #[test]
 fn fifo_orders_a_link_and_its_absence_does_not() {
@@ -131,7 +131,7 @@ fn a_node_that_exits_on_its_own_fails_the_run() {
 }
 
 /// Crashes land at the instant the scenario names, and a crashed sender's in-flight messages are
-/// dropped — which is what makes a *partial* broadcast expressible at all.
+/// dropped, which is what makes a *partial* broadcast expressible at all.
 #[test]
 fn a_crash_lands_on_time_and_drops_what_was_in_flight() {
     if !have_python() {

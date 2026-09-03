@@ -1,4 +1,4 @@
-//! cuelight — a deterministic discrete-event simulator for distributed systems.
+//! cuelight: a deterministic discrete-event simulator for distributed systems.
 //!
 //! The harness *is* the network. Nodes are separate processes speaking JSON lines on stdin/stdout;
 //! the harness owns logical time, routes every message and injects faults. Runs replay exactly
@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 const USAGE: &str = "\
-cuelight — a deterministic discrete-event simulator for distributed systems
+cuelight: a deterministic discrete-event simulator for distributed systems
 
 USAGE:
     cuelight run    [options] --bin <cmd...>    one run
@@ -170,7 +170,7 @@ fn main() -> ExitCode {
             match sim::Sim::new(config(&a, sc, a.out.clone())).and_then(|s| s.run()) {
                 Ok(o) => {
                     println!(
-                        "ok — {} at t={} ({} events)\n     {}",
+                        "ok: {} at t={} ({} events)\n     {}",
                         o.reason, o.end_time, o.events, a.out.display()
                     );
                     ExitCode::SUCCESS
@@ -198,10 +198,10 @@ fn main() -> ExitCode {
                 }
             }
             if js[0] == js[1] {
-                println!("DETERMINISTIC — seed {} byte-identical ({} bytes)", a.seed, js[0].len());
+                println!("DETERMINISTIC: seed {} byte-identical ({} bytes)", a.seed, js[0].len());
                 ExitCode::SUCCESS
             } else {
-                eprintln!("NONDETERMINISTIC — journals differ for seed {}", a.seed);
+                eprintln!("NONDETERMINISTIC: journals differ for seed {}", a.seed);
                 eprintln!("  compare {0}/check-0 and {0}/check-1", a.out.display());
                 ExitCode::FAILURE
             }

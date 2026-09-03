@@ -1,7 +1,7 @@
 // Ping-pong: the smallest program that exercises the whole interface.
 //
 // n0 pings the next node around the ring, which pongs back, for a fixed number of rounds. It uses
-// every part of the template — handlers, Send, SetTimer with a callback, Observe — and deliberately
+// every part of the template: handlers, Send, SetTimer with a callback, Observe. It deliberately
 // implements no algorithm from any lab.
 //
 //	go build -o example ./example && cuelight run --seed 1 --bin ./example

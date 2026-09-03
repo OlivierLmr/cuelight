@@ -3,7 +3,7 @@
 A node is a *pure event handler*: it receives one event, emits its outgoing messages, and
 announces `done`. Same event sequence in, same actions out.
 
-Do not use wall-clock time, threads, or unseeded randomness — replay depends on determinism,
+Do not use wall-clock time, threads, or unseeded randomness. Replay depends on determinism,
 and the harness will detect and report violations as your bug.
 """
 
@@ -38,7 +38,7 @@ class Node:
     def set_timer(self, after, callback=None):
         """Fire after `after` units of LOGICAL time. Returns the timer id.
 
-        With a callback, only that callback runs when it fires — which is what lets several
+        With a callback, only that callback runs when it fires, which is what lets several
         layers hold timers at once without colliding.
         Timers cannot be cancelled; if you re-arm, guard the callback with a generation
         counter and ignore stale firings.

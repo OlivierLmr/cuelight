@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Minimal JSON reader/writer, so the template needs no build tooling — plain {@code javac} works.
+ * Minimal JSON reader/writer, so the template needs no build tooling: plain {@code javac} works.
  *
  * Values map to: {@code Map<String,Object>}, {@code List<Object>}, {@code String}, {@code Double},
  * {@code Boolean}, {@code null}. Insertion order is preserved on write, which keeps runs
