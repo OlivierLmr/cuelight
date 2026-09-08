@@ -14,16 +14,16 @@
 //! use std::process::ExitCode;
 //!
 //! static CAMPAIGNS: &[Campaign] = &[Campaign {
-//!     label: "broadcast", stimuli: "stimuli/broadcast.json", fifo: true, faults: true, seeds: 200,
+//!     label: "steady", stimuli: "stimuli/steady.json", fifo: true, faults: true, seeds: 200,
 //! }];
 //!
 //! fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
-//!     r.add("delivered-something", Kind::Safety, !ev.observes.is_empty(), "…".into());
+//!     r.add("said-something", Kind::Safety, !ev.observes.is_empty(), "…".into());
 //! }
 //!
 //! fn main() -> ExitCode {
 //!     cuelight_suite::run(
-//!         Suite { name: "lab1", campaigns: CAMPAIGNS, directed: &[], check },
+//!         Suite { name: "mine", campaigns: CAMPAIGNS, directed: &[], check },
 //!         env!("CARGO_MANIFEST_DIR"),
 //!     )
 //! }
@@ -208,7 +208,7 @@ fn stem(path: &str) -> &str {
 fn usage(name: &str) -> String {
     format!(
         "\
-{name} — run this lab's tests and judge the journals they write
+{name}: run this lab's tests and judge the journals they write
 
 USAGE:
     {name} [options] --bin <cmd...>
@@ -342,7 +342,7 @@ pub fn run(suite: Suite, default_lab_dir: &str) -> ExitCode {
                 .and_then(|raw| StimulusSpec::from_json(&raw))
             {
                 Ok(s) => Some(s),
-                Err(e) => { println!("{} — {e}", c.label); all_ok = false; continue }
+                Err(e) => { println!("{}: {e}", c.label); all_ok = false; continue }
             }
         };
         let opts = ExpandOpts {
@@ -376,7 +376,7 @@ pub fn run(suite: Suite, default_lab_dir: &str) -> ExitCode {
                 },
             }
         }
-        println!("{} — {pass}/{} seeds passed{}", c.label, hi - lo + 1,
+        println!("{}: {pass}/{} seeds passed{}", c.label, hi - lo + 1,
                  if o.range.is_some() { format!(" (graines {lo}..{hi})") } else { String::new() });
         for (s, e) in fails.iter().take(5) {
             println!("  seed {s}: {e}");
@@ -401,7 +401,7 @@ pub fn run(suite: Suite, default_lab_dir: &str) -> ExitCode {
         let path = o.lab_dir.join(d.path);
         let stem = stem(d.path);
         let dir = o.out.join("directed").join(stem);
-        println!("\n{} — {}", d.path, d.why);
+        println!("\n{}: {}", d.path, d.why);
         let sc = match std::fs::read_to_string(&path)
             .map_err(|e| format!("{}: {e}", path.display()))
             .and_then(|raw| Scenario::from_json(&raw))
@@ -435,7 +435,56 @@ pub fn run(suite: Suite, default_lab_dir: &str) -> ExitCode {
         println!("\nall good");
         ExitCode::SUCCESS
     } else {
-        println!("\nsomething failed — see above");
+        println!("\nsomething failed, see above");
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sc(json: &str) -> Scenario {
+        Scenario::from_json(json).expect("scenario")
+    }
+
+    #[test]
+    fn effective_gst_is_the_scheduled_one_when_nothing_disturbs_it() {
+        assert_eq!(effective_gst(&sc(r#"{"gst": 500}"#)), 500);
+    }
+
+    #[test]
+    fn a_crash_moves_it_to_the_crash() {
+        let s = sc(r#"{"gst": 500, "faults": [{"kind": "crash", "at": 900, "node": "n1"}]}"#);
+        assert_eq!(effective_gst(&s), 900);
+    }
+
+    #[test]
+    fn a_pause_moves_it_to_the_end_of_the_pause_not_its_start() {
+        let s = sc(r#"{"gst": 500, "faults":
+            [{"kind": "pause", "at": 600, "node": "n1", "duration": 700}]}"#);
+        assert_eq!(effective_gst(&s), 1300);
+    }
+
+    #[test]
+    fn a_partition_counts_like_a_pause() {
+        let s = sc(r#"{"gst": 500, "faults":
+            [{"kind": "partition", "at": 600, "duration": 700, "side": ["n0"]}]}"#);
+        assert_eq!(effective_gst(&s), 1300);
+    }
+
+    #[test]
+    fn a_fault_that_ends_before_gst_leaves_it_alone() {
+        let s = sc(r#"{"gst": 5000, "faults":
+            [{"kind": "pause", "at": 100, "node": "n1", "duration": 200}]}"#);
+        assert_eq!(effective_gst(&s), 5000);
+    }
+
+    #[test]
+    fn the_latest_fault_wins_whatever_the_order() {
+        let s = sc(r#"{"gst": 100, "faults": [
+            {"kind": "pause", "at": 3000, "node": "n1", "duration": 10},
+            {"kind": "crash", "at": 200, "node": "n2"}]}"#);
+        assert_eq!(effective_gst(&s), 3010);
     }
 }
