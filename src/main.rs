@@ -1,21 +1,10 @@
-//! cuelight: a deterministic discrete-event simulator for distributed systems.
+//! The `cuelight` command line: argument parsing and printing, over the library of the same name.
 //!
-//! The harness *is* the network. Nodes are separate processes speaking JSON lines on stdin/stdout;
-//! the harness owns logical time, routes every message and injects faults. Runs replay exactly
-//! from their scenario.
-//!
-//! It has **no notion of success**. It does not know what a property is, or what a lab is: it
-//! executes a scenario and writes a journal. Whoever judges that journal lives elsewhere.
+//! Every behaviour lives in the library, so that a checker calling `cuelight` as a dependency and a
+//! person typing `cuelight run` exercise the same code.
 
-mod journal;
-mod node;
-mod proto;
-mod rng;
-mod scenario;
-mod sim;
-mod viz;
-
-use scenario::{ExpandOpts, Scenario, StimulusSpec};
+use cuelight::scenario::{ExpandOpts, Scenario, StimulusSpec};
+use cuelight::{sim, viz};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
