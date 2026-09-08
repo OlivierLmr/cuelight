@@ -1,3 +1,6 @@
+[workspace]
+members = ["cuelight-suite"]
+
 [package]
 name = "cuelight"
 version = "0.1.0"

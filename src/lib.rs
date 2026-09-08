@@ -16,14 +16,7 @@
 //! ```no_run
 //! use cuelight::{scenario::ExpandOpts, sim, Scenario};
 //!
-//! let sc = Scenario::expand(1, &ExpandOpts {
-//!     nodes: 4,
-//!     f: 1,
-//!     time_limit: 10_000,
-//!     fifo: false,
-//!     with_faults: true,
-//!     stimuli: None,
-//! });
+//! let sc = Scenario::expand(1, &ExpandOpts::default());
 //! let outcome = sim::Sim::new(sim::Config {
 //!     program: vec!["python3".into(), "node.py".into()],
 //!     scenario: sc,
