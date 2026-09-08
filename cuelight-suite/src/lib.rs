@@ -1,11 +1,11 @@
-//! Drive cuelight over a lab's tests, judge the journals it writes.
+//! Drive cuelight over a suite of scenarios, judge the journals it writes.
 //!
 //! cuelight executes one scenario and records what happened. It has no notion of success: it does
-//! not know what a property is, or what a lab is. Everything on this side of that line lives here:
+//! not know what a property is, or what a test is. Everything on this side of that line lives here:
 //! running campaigns, loading journals, dating liveness from the effective GST, and printing a
 //! verdict.
 //!
-//! A lab binary supplies a [`Suite`]: its campaigns, its directed scenarios with the failures it
+//! A caller supplies a [`Suite`]: its campaigns, its directed scenarios with the failures it
 //! *expects*, and one function that turns a run into a [`Report`]. This crate never inspects that
 //! function; it calls it.
 //!
@@ -158,7 +158,7 @@ pub fn load_events(dir: &Path) -> Result<Events, String> {
 /// student running once has a 90% chance of concluding a broken mutex works.
 pub struct Campaign {
     pub label: &'static str,
-    /// Stimulus template, relative to the lab directory. Empty means the workload is the faults
+    /// Stimulus template, relative to the suite directory. Empty means the workload is the faults
     /// alone, which is what a failure detector driven by crashes and time needs.
     pub stimuli: &'static str,
     pub fifo: bool,
@@ -172,7 +172,7 @@ pub struct Campaign {
 /// `expect_fail` is not a formality. A scenario can exist to show what an algorithm's assumptions
 /// cost when they do not hold, and a suite that could only say "all green" could not express one.
 pub struct Directed {
-    /// Scenario path, relative to the lab directory.
+    /// Scenario path, relative to the suite directory.
     pub path: &'static str,
     pub expect_fail: &'static [&'static str],
     pub why: &'static str,
@@ -188,7 +188,7 @@ pub struct Suite {
 // ------------------------------------------------------------------- running
 
 struct Opts {
-    lab_dir: PathBuf,
+    suite_dir: PathBuf,
     out: PathBuf,
     seeds: Option<u64>,
     /// Inclusive seed range. Debugging one failure should not mean re-running the other 199.
@@ -208,28 +208,28 @@ fn stem(path: &str) -> &str {
 fn usage(name: &str) -> String {
     format!(
         "\
-{name}: run this lab's tests and judge the journals they write
+{name}: run this suite's scenarios and judge the journals they write
 
 USAGE:
     {name} [options] --bin <cmd...>
 
 OPTIONS:
     --bin <cmd...>     command launching one node (MUST BE LAST: swallows the rest of the line)
-    --lab-dir <path>   where this lab's scenarios/ and stimuli/ live
-    --out <dir>        run directory                 [default: store/<lab>]
+    --suite-dir <path> where this suite's scenarios/ and stimuli/ live
+    --out <dir>        run directory                 [default: store/<suite>]
     --seeds <n>        override every campaign's seed count
     --seed <a>[..<b>]  run one seed, or an inclusive range, instead of a whole campaign
     --only <name>      run only what matches: a campaign label or a scenario name
     --watchdog <ms>    wall-clock hang detector      [default: 5000]
-    --list             show the campaigns and scenarios this lab defines, then exit
+    --list             show the campaigns and scenarios this suite defines, then exit
 "
     )
 }
 
-fn parse(argv: &[String], lab: &str, default_lab_dir: &str) -> Result<Opts, String> {
+fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, String> {
     let mut o = Opts {
-        lab_dir: PathBuf::from(default_lab_dir),
-        out: PathBuf::from("store").join(lab),
+        suite_dir: PathBuf::from(default_suite_dir),
+        out: PathBuf::from("store").join(suite),
         seeds: None,
         range: None,
         only: None,
@@ -250,7 +250,7 @@ fn parse(argv: &[String], lab: &str, default_lab_dir: &str) -> Result<Opts, Stri
                 }
                 return Ok(o);
             }
-            "--lab-dir" => { o.lab_dir = PathBuf::from(val(i)?); i += 2 }
+            "--suite-dir" => { o.suite_dir = PathBuf::from(val(i)?); i += 2 }
             "--out" => { o.out = PathBuf::from(val(i)?); i += 2 }
             "--seeds" => { o.seeds = Some(val(i)?.parse().map_err(|_| "bad --seeds")?); i += 2 }
             "--watchdog" => { o.watchdog = val(i)?.parse().map_err(|_| "bad --watchdog")?; i += 2 }
@@ -288,12 +288,12 @@ fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
     .map(|_| ())
 }
 
-/// Entry point for a lab binary:
+/// Entry point for the binary that owns a suite:
 /// `fn main() -> ExitCode { cuelight_suite::run(SUITE, env!("CARGO_MANIFEST_DIR")) }`
-pub fn run(suite: Suite, default_lab_dir: &str) -> ExitCode {
+pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let name = format!("{}-check", suite.name);
-    let o = match parse(&argv, suite.name, default_lab_dir) {
+    let o = match parse(&argv, suite.name, default_suite_dir) {
         Ok(o) => o,
         Err(e) => { eprintln!("error: {e}\n\n{}", usage(&name)); return ExitCode::FAILURE }
     };
@@ -336,7 +336,7 @@ pub fn run(suite: Suite, default_lab_dir: &str) -> ExitCode {
         let stimuli = if c.stimuli.is_empty() {
             None
         } else {
-            let p = o.lab_dir.join(c.stimuli);
+            let p = o.suite_dir.join(c.stimuli);
             match std::fs::read_to_string(&p)
                 .map_err(|e| format!("{}: {e}", p.display()))
                 .and_then(|raw| StimulusSpec::from_json(&raw))
@@ -398,7 +398,7 @@ pub fn run(suite: Suite, default_lab_dir: &str) -> ExitCode {
                 continue;
             }
         }
-        let path = o.lab_dir.join(d.path);
+        let path = o.suite_dir.join(d.path);
         let stem = stem(d.path);
         let dir = o.out.join("directed").join(stem);
         println!("\n{}: {}", d.path, d.why);

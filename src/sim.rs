@@ -192,9 +192,9 @@ impl Sim {
             }
             // Anything else a node sends to the harness is an *observation*: it is recorded and
             // that is all. Which observations mean something, whether `deliver`, `enter_cs`, `leader`
-            // or whatever a lab invents, is not this tool's business. It used to hold a whitelist of
-            // six names taken straight from labs 1 to 4, which is exactly the coupling that made
-            // the harness unusable for anything else.
+            // or whatever a caller invents, is not this tool's business. It used to hold a
+            // whitelist of six names taken straight from one project's exercises, which is exactly
+            // the coupling that made the harness unusable for anything else.
             _ => {
                 self.journal.record(self.now, "observe", &env);
             }
@@ -260,7 +260,7 @@ impl Sim {
         for i in 0..self.nodes.len() {
             // Deliberately NOT sent: `gst`. Knowing it lets a node simply refuse to suspect
             // anyone until GST has passed: a perfect failure detector with no adaptive timeout,
-            // which passes every seed and skips the whole content of lab 2. It is still in
+            // which passes every seed and skips everything the exercise is about. It is still in
             // `scenario.json` in the run directory, so it stays available for debugging a trace
             // without being reachable from inside the algorithm.
             let body = json!({

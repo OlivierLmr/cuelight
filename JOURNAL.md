@@ -46,7 +46,7 @@ wall-clock, no pids, no absolute paths. That is what makes `check` meaningful.
 | `kind` | Emitted when | Note |
 |---|---|---|
 | `init` | once per node, at `t=0` | `body` carries `node_id`, `node_ids`, `n`, `f`, `provided` |
-| `stimulus` | the harness pokes a node | `body` comes from the lab's stimulus template; the harness never interprets it |
+| `stimulus` | the harness pokes a node | `body` comes from the caller's stimulus template; the harness never interprets it |
 | `send` | a node emits a message to another node | logged when sent, not when delivered |
 | `recv` | that message is delivered | absent if it was dropped or the run ended first |
 | `observe` | a node reports something to the harness | **anything** addressed to `harness` that is not `set_timer` or `done` |
@@ -54,7 +54,7 @@ wall-clock, no pids, no absolute paths. That is what makes `check` meaningful.
 | `timer` | that timer fires | |
 
 `observe` is where properties are read from. The harness does not know or care what an observation
-means, whether `deliver`, `enter_cs`, `leader`, or anything a future lab invents. It records the body
+means, whether `deliver`, `enter_cs`, `leader`, or anything a caller invents. It records the body
 verbatim and moves on.
 
 `done` is **not** journalled. It is the barrier that lets logical time advance, not an event.

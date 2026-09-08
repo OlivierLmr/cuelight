@@ -2,7 +2,7 @@
 //
 // n0 pings the next node around the ring, which pongs back, for a fixed number of rounds. It uses
 // every part of the template: handlers, send, set_timer with a callback, observe. It
-// deliberately implements no algorithm from any lab.
+// deliberately implements no distributed algorithm.
 //
 //   c++ -std=c++17 -O2 -o example example/main.cpp
 //   cuelight run --seed 1 --bin ./example
