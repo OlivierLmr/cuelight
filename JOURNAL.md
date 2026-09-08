@@ -35,11 +35,16 @@ Two shapes. Both always carry `seq`, `t` and `kind`.
 | `seq` | the harness's own ordering, dense from 0. Independent of scheduling, so two events at the same `t` are still totally ordered |
 | `t` | **logical** time. Never wall-clock. Non-decreasing along `seq` |
 | `kind` | which of the entries below |
-| `src`, `dest`, `body` | message-shaped entries: an envelope exactly as it travelled |
+| `src`, `dest`, `body` | message-shaped entries: the envelope as it travelled, its object keys sorted |
 | `detail` | event-shaped entries: what the harness did on its own |
 
 Nothing in a journal may vary between two runs of the same scenario against the same program: no
 wall-clock, no pids, no absolute paths. That is what makes `check` meaningful.
+
+**Object keys are sorted, at every depth**, in `body` and in `detail`. Key order carries no meaning
+in JSON and language runtimes disagree about it, so the harness writes one form: two nodes that
+behaved identically produce identical bytes whatever language they were written in. Array order is
+left alone, being meaningful.
 
 ## Message-shaped entries
 

@@ -8,7 +8,7 @@ There is deliberately **no `broadcast`**. Sending to every peer is three lines, 
 broadcast the sender must still deliver to itself, which the loop alone does not do. `peers` is
 exposed; the loop is theirs.
 
-All four are verified against the same scenarios and produce the same results:
+All four are verified against the same scenarios and produce identical results:
 
 | Language | Build | Deps |
 |---|---|---|
@@ -26,10 +26,8 @@ so it can ship anywhere without giving an answer away.
 cuelight run --seed 1 --no-faults --bin <your command>
 ```
 
-The four are verified to produce the same observation trace on the same scenario, at the same
-logical times. Go's JSON encoder sorts the keys of an object, so its bodies differ from the other
-three in key order and nothing else. That is the template's own test: if your language's plumbing is
-right, you get this.
+The four are verified to produce a byte-identical observation trace on the same scenario. That is
+the template's own test: if your language's plumbing is right, you get exactly this.
 
 ```
 358 n1 saw_ping 1      1469 n1 saw_ping 3      1528 n1 saw_ping 5
