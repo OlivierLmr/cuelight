@@ -32,7 +32,7 @@ impl Fault {
 
 /// A workload event: the harness poking a node to do something ("broadcast this", "you want the
 /// critical section", "propose this value"). Carried by the scenario so the harness itself stays
-/// lab-agnostic.
+/// workload-agnostic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stimulus {
     pub at: u64,
@@ -40,11 +40,11 @@ pub struct Stimulus {
     pub body: Value,
 }
 
-/// A stimulus template, supplied by the lab. The harness ships none of its own.
+/// A stimulus template, supplied by the caller. The harness ships none of its own.
 ///
 /// The point of the split: `do_broadcast`, `request_cs` and `propose` are event names belonging to
-/// *some* lab, and an event-name is exactly the kind of knowledge this tool must not carry. A lab
-/// describes its workload in JSON and the harness expands it against the seed.
+/// *some* caller, and an event-name is exactly the kind of knowledge this tool must not carry. A
+/// caller describes its workload in JSON and the harness expands it against the seed.
 ///
 /// ```json
 /// { "events": [ { "count": [3, 9], "at_frac": [0.0, 0.5],
@@ -263,7 +263,7 @@ impl Scenario {
         }
     }
 
-    /// Expand the lab's stimulus template. No template, no stimuli: the harness invents none.
+    /// Expand the caller's stimulus template. No template, no stimuli: the harness invents none.
     ///
     /// Draw order is `count`, then per event `node` then `at` then the body's `$rand`s. It is part
     /// of the meaning of a seed: changing it would silently repoint every stored seed at a
@@ -370,8 +370,8 @@ mod tests {
 
     #[test]
     fn the_stimulus_template_does_not_disturb_the_network() {
-        // Workload draws come last in the stream, so a lab changing its template must not repoint
-        // every other lab's seeds.
+        // Workload draws come last in the stream, so a caller changing its template must not
+        // repoint every other one's seeds.
         let bare = Scenario::expand(7, &opts(4, true, None));
         let spec = StimulusSpec::from_json(
             r#"{"events":[{"count":[3,9],"at_frac":[0.0,0.5],"body":{"type":"x","id":"m<i>"}}]}"#,
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn no_template_means_no_stimuli() {
-        // The tool ships no workload of its own: without a lab-supplied template it invents none.
+        // The tool ships no workload of its own: without a caller-supplied template it invents none.
         assert!(Scenario::expand(1, &opts(4, true, None)).stimuli.is_empty());
     }
 

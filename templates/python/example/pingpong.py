@@ -3,7 +3,7 @@
 
 n0 pings its first peer, which pongs back, and so on until a fixed number of rounds. It uses every
 part of the template: handlers, `send`, `set_timer` with a callback, `observe`. It deliberately
-implements no algorithm from any lab.
+implements no distributed algorithm.
 
     cuelight run --seed 1 --bin python3 templates/python/example/pingpong.py
 """

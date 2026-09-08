@@ -19,7 +19,7 @@ All four are verified against the same scenarios and produce identical results:
 
 Each ships an `example/` node playing **ping-pong**: n0 pings the next node around the ring, which
 pongs back, for five rounds. It touches every part of the template: handler registration, `send`,
-`set_timer` with a callback, `observe`. It deliberately implements **no algorithm from any lab**,
+`set_timer` with a callback, `observe`. It deliberately implements **no distributed algorithm**,
 so it can ship anywhere without giving an answer away.
 
 ```sh
@@ -70,5 +70,5 @@ def _expire(self, p, g):
 ## Deliberately unlike Maelstrom's templates
 
 No threads, no blocking RPC, no wall-clock. Maelstrom's are built around `resp = await rpc(dest)`,
-which cannot work here: the reply arrives in a later event. Every lab in this course is one-way
-messaging, so the template is smaller and the algorithm is all that is left.
+which cannot work here: the reply arrives in a later event. Everything here is one-way messaging,
+so the template is smaller and the algorithm is all that is left.

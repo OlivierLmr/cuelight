@@ -4,7 +4,7 @@
 //! the harness owns logical time, routes every message and injects faults. Runs replay exactly
 //! from their scenario.
 //!
-//! It has **no notion of success**. It does not know what a property is, or what a lab is: it
+//! It has **no notion of success**. It does not know what a property is, or what a test is: it
 //! executes a scenario and writes a journal. Whoever judges that journal lives elsewhere.
 //!
 //! # The three public modules
