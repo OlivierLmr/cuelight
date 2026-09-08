@@ -29,6 +29,46 @@ Two properties, both non-negotiable, and each rules out most alternatives:
   runs a scenario twice and diffs the journals, which catches wall-clock reads, threads and
   unseeded randomness in *your* program.
 
+## Two crates
+
+| Crate | What it is |
+|---|---|
+| `cuelight` | the simulator: a library, and a command line over it |
+| `cuelight-suite` | a runner over that library: many scenarios, and your verdict on each |
+
+```toml
+[dependencies]
+cuelight-suite = { git = "https://github.com/OlivierLmr/cuelight", tag = "v0.1.0" }
+```
+
+The simulator gives you one run and its journal. Judging that run, sweeping seeds, keeping the
+failures and deleting the rest is a different job, and `cuelight-suite` does it without ever knowing
+what your properties are. You hand it a `Suite` and a function; it calls the function.
+
+```rust
+use cuelight_suite::{Campaign, Events, Kind, Report, Scenario, Suite};
+use std::process::ExitCode;
+
+static CAMPAIGNS: &[Campaign] = &[Campaign {
+    label: "steady", stimuli: "stimuli/steady.json", fifo: true, faults: true, seeds: 200,
+}];
+
+fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
+    r.add("said-something", Kind::Safety, !ev.observes.is_empty(), "...".into());
+}
+
+fn main() -> ExitCode {
+    cuelight_suite::run(
+        Suite { name: "mine", campaigns: CAMPAIGNS, directed: &[], check },
+        env!("CARGO_MANIFEST_DIR"),
+    )
+}
+```
+
+That binary replays one case before judging anything and stops if your node does not reproduce it.
+Then it runs every campaign, deletes the seeds that passed, and prints under each failure the
+command that runs it again, the journal, and a sequence diagram.
+
 ## Your side of the contract
 
 A node is a **pure event handler**: same event sequence in, same actions out. Three rules follow,
@@ -145,9 +185,9 @@ Every run writes a directory (`--out`, default `store/latest`):
 **[JOURNAL.md](JOURNAL.md) is the format**, and it is a stable contract: it is what your checker
 parses, what `viz` renders, and what `check` diffs.
 
-Plugging in your own checker means nothing more than reading those two files after the run. To
-sweep, loop over `run --seed i` and judge each journal. cuelight has no `sweep` of its own,
-because pruning the runs that passed would mean knowing what passing is.
+Plugging in your own checker means nothing more than reading that file after the run. The simulator
+has no sweep of its own, because pruning the runs that passed would mean knowing what passing is.
+`cuelight-suite` sweeps precisely because you give it that knowledge, as a function.
 
 ## Commands
 
@@ -170,6 +210,25 @@ cuelight scenario [options]                 print an expanded scenario, to edit 
 | `--time-limit <t>` | logical time limit (10000) |
 | `--watchdog <ms>` | wall-clock hang detector (5000) |
 | `--out <dir>` | run directory (`store/latest`) |
+| `--journal <path>` | the journal `viz` renders |
+
+### The suite your binary gets
+
+A binary built on `cuelight-suite` parses these for you, identically whatever it checks:
+
+| Option | |
+|---|---|
+| `--bin <cmd...>` | command launching one node. **Must be last** |
+| `--suite-dir <path>` | where this suite's `scenarios/` and `stimuli/` live |
+| `--out <dir>` | run directory (`store/<suite>`) |
+| `--seeds <n>` | override every campaign's seed count |
+| `--seed <a>[..<b>]` | one seed, or an inclusive range, instead of a whole campaign |
+| `--only <name>` | run only what matches: a campaign label or a scenario name |
+| `--watchdog <ms>` | wall-clock hang detector (5000) |
+| `--list` | show what this suite declares, then exit |
+
+`--seed` and `--only` are what make one failure cheap to look at: they run that case and nothing
+else, and the failure told you which to type.
 
 ## A complete example
 
@@ -187,8 +246,9 @@ grep '"kind":"observe"' store/latest/journal.jsonl
 696 n0 saw_pong 1    1200 n0 saw_pong 2    1470 n0 saw_pong 3
 ```
 
-All four languages produce that trace character for character. If yours does too, your plumbing is
-right.
+All four produce those observations, at those logical times, with those contents. Three of them
+line for line: Go's JSON encoder sorts the keys of an object, so its bodies carry the same fields in
+another order. If yours matches on times and contents, your plumbing is right.
 
 `templates/` also holds the node runtime for those four languages: the event loop, the envelope
 handling and the `done` barrier, about ninety lines each. Any language that can read and write
