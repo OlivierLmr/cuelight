@@ -390,11 +390,11 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         Err(e) => { eprintln!("error: {e}\n\n{}", usage(&name)); return ExitCode::FAILURE }
     };
     if o.list {
-        println!("campagnes :");
+        println!("campaigns:");
         for c in suite.campaigns {
-            println!("  {:<12} {} graines, fifo={}, pannes={}", c.label, c.seeds, c.fifo, c.faults);
+            println!("  {:<12} {} seeds, fifo={}, faults={}", c.label, c.seeds, c.fifo, c.faults);
         }
-        println!("scénarios dirigés :");
+        println!("directed scenarios:");
         for d in suite.directed {
             println!("  {:<12} {}", stem(d.path), d.why);
         }
@@ -411,7 +411,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         let known = suite.campaigns.iter().any(|c| c.label.contains(pat.as_str()))
             || suite.directed.iter().any(|d| stem(d.path).contains(pat.as_str()));
         if !known {
-            eprintln!("--only {pat} ne correspond à rien. `--list` montre ce qui existe.");
+            eprintln!("--only {pat} matches nothing. `--list` shows what this suite defines.");
             return ExitCode::FAILURE;
         }
     }
@@ -462,7 +462,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
             }
         }
         println!("{}: {pass}/{} seeds passed{}", c.label, hi - lo + 1,
-                 if o.range.is_some() { format!(" (graines {lo}..{hi})") } else { String::new() });
+                 if o.range.is_some() { format!(" (seeds {lo}..{hi})") } else { String::new() });
         for (s, e) in fails.iter().take(5) {
             println!("  seed {s}: {e}");
             how_to_replay(&name, &o, &format!("--seed {s} --only {}", c.label));
