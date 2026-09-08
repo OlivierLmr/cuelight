@@ -276,6 +276,31 @@ fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, 
     Ok(o)
 }
 
+/// Render the sequence diagram beside the journal.
+///
+/// Only for runs worth opening: a campaign deletes the seeds that pass, and rendering hundreds of
+/// diagrams nobody looks at would be waste.
+fn draw(dir: &Path) -> Option<PathBuf> {
+    let out = dir.join("messages.mmd");
+    cuelight::viz::render(&dir.join("journal.jsonl"), &out, 200).ok().map(|_| out)
+}
+
+/// Where to read what happened. The run directory holds it all, but nobody guesses its path.
+fn where_to_read(dir: &Path) {
+    let journal = dir.join("journal.jsonl");
+    if journal.exists() {
+        println!("    journal: {}", journal.display());
+    }
+    if let Some(mmd) = draw(dir) {
+        println!("    diagram: {}", mmd.display());
+    }
+}
+
+/// The command that runs this one case again, ready to paste.
+fn how_to_replay(name: &str, o: &Opts, selector: &str) {
+    println!("    replay:  {name} {selector} --bin {}", o.program.join(" "));
+}
+
 /// One simulation. Returns what the run wrote, or why it could not run.
 fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
     sim::Sim::new(sim::Config {
@@ -380,7 +405,8 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
                  if o.range.is_some() { format!(" (graines {lo}..{hi})") } else { String::new() });
         for (s, e) in fails.iter().take(5) {
             println!("  seed {s}: {e}");
-            println!("    replay: --seed {s} --only {}", c.label);
+            how_to_replay(&name, &o, &format!("--seed {s} --only {}", c.label));
+            where_to_read(&o.out.join(c.label).join(s.to_string()));
         }
         if fails.len() > 5 {
             println!("  ... and {} more", fails.len() - 5);
@@ -424,8 +450,12 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
                         println!("  → as expected");
                     } else {
                         println!("  → EXPECTED {:?}, GOT {:?}", d.expect_fail, got);
+                        how_to_replay(&name, &o, &format!("--only {stem}"));
                         all_ok = false;
                     }
+                    // Always, even when it behaved: a directed scenario is often run precisely to
+                    // be looked at, and the diagram is the reason to look.
+                    where_to_read(&dir);
                 }
             },
         }
