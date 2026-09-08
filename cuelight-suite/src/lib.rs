@@ -390,13 +390,23 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         Err(e) => { eprintln!("error: {e}\n\n{}", usage(&name)); return ExitCode::FAILURE }
     };
     if o.list {
-        println!("campagnes :");
+        // Pad to the longest name this suite actually declares. A fixed width fits one suite and
+        // runs the description into the name of every other.
+        let w = suite
+            .campaigns
+            .iter()
+            .map(|c| c.label.len())
+            .chain(suite.directed.iter().map(|d| stem(d.path).len()))
+            .max()
+            .unwrap_or(0)
+            .max(8); // a floor, so a suite with one short name still reads as a column
+        println!("campaigns:");
         for c in suite.campaigns {
-            println!("  {:<12} {} graines, fifo={}, pannes={}", c.label, c.seeds, c.fifo, c.faults);
+            println!("  {:<w$} {} seeds, fifo={}, faults={}", c.label, c.seeds, c.fifo, c.faults);
         }
-        println!("scénarios dirigés :");
+        println!("directed scenarios:");
         for d in suite.directed {
-            println!("  {:<12} {}", stem(d.path), d.why);
+            println!("  {:<w$} {}", stem(d.path), d.why);
         }
         return ExitCode::SUCCESS;
     }
@@ -411,7 +421,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         let known = suite.campaigns.iter().any(|c| c.label.contains(pat.as_str()))
             || suite.directed.iter().any(|d| stem(d.path).contains(pat.as_str()));
         if !known {
-            eprintln!("--only {pat} ne correspond à rien. `--list` montre ce qui existe.");
+            eprintln!("--only {pat} matches nothing. `--list` shows what this suite defines.");
             return ExitCode::FAILURE;
         }
     }
@@ -462,7 +472,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
             }
         }
         println!("{}: {pass}/{} seeds passed{}", c.label, hi - lo + 1,
-                 if o.range.is_some() { format!(" (graines {lo}..{hi})") } else { String::new() });
+                 if o.range.is_some() { format!(" (seeds {lo}..{hi})") } else { String::new() });
         for (s, e) in fails.iter().take(5) {
             println!("  seed {s}: {e}");
             how_to_replay(&name, &o, &format!("--seed {s} --only {}", c.label));
