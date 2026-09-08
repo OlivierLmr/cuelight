@@ -208,5 +208,5 @@ lines works; there is nothing else to implement.
 **What gated a merge.** Several of these pull requests ran past a thousand lines, and I did not
 read them line by line. I read what carried the design and let the rest ride on two things. The
 tests: 28 of them, each one checked to fail when the behaviour it guards breaks, which is a stronger
-claim than "the tests pass". And use: I ran the tool and wrote a full suite against it, which is where most
+claim than "the tests pass". And use: I used it in the context of my own course, which is where most
 of my corrections came from.
