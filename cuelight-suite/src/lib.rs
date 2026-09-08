@@ -276,6 +276,23 @@ fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, 
     Ok(o)
 }
 
+/// How a campaign's seeds expand: its own switches, and its stimulus template read from disk.
+fn expand_opts(o: &Opts, c: &Campaign) -> Result<ExpandOpts, String> {
+    let stimuli = if c.stimuli.is_empty() {
+        None
+    } else {
+        let p = o.suite_dir.join(c.stimuli);
+        let raw = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        Some(StimulusSpec::from_json(&raw)?)
+    };
+    Ok(ExpandOpts { fifo: c.fifo, with_faults: c.faults, stimuli, ..ExpandOpts::default() })
+}
+
+fn load_scenario(path: &Path) -> Result<Scenario, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Scenario::from_json(&raw)
+}
+
 /// Render the sequence diagram beside the journal.
 ///
 /// Only for runs worth opening: a campaign deletes the seeds that pass, and rendering hundreds of
@@ -311,6 +328,56 @@ fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
     })?
     .run()
     .map(|_| ())
+}
+
+/// Replay one case and compare the two journals, before judging anything.
+///
+/// A node that reads the system clock, spawns a thread or draws unseeded randomness produces a
+/// different run every time. Every verdict below would then describe a run nobody can reproduce,
+/// and the replay command printed under each failure would replay something else. So this runs
+/// first, and stops the suite when it fails, rather than appearing as one line among the results.
+///
+/// Two runs, against several hundred: the cost is invisible.
+fn replays_identically(o: &Opts, suite: &Suite) -> Result<String, String> {
+    let (what, sc) = match suite.directed.first() {
+        Some(d) => (stem(d.path).to_string(), load_scenario(&o.suite_dir.join(d.path))?),
+        None => match suite.campaigns.first() {
+            Some(c) => (format!("{} seed 1", c.label), Scenario::expand(1, &expand_opts(o, c)?)),
+            None => return Ok(String::new()),
+        },
+    };
+
+    let mut runs = vec![];
+    for pass in ["a", "b"] {
+        let dir = o.out.join("replay").join(pass);
+        run_once(o, &dir, sc.clone())?;
+        let j = dir.join("journal.jsonl");
+        let text = std::fs::read_to_string(&j).map_err(|e| format!("{}: {e}", j.display()))?;
+        runs.push((j, text));
+    }
+
+    if runs[0].1 == runs[1].1 {
+        let _ = std::fs::remove_dir_all(o.out.join("replay"));
+        return Ok(what);
+    }
+
+    // Name the line, because "the journals differ" sends someone to diff two thousand-line files.
+    let line = runs[0]
+        .1
+        .lines()
+        .zip(runs[1].1.lines())
+        .position(|(a, b)| a != b)
+        .map(|i| i + 1)
+        .unwrap_or_else(|| runs[0].1.lines().count().min(runs[1].1.lines().count()) + 1);
+
+    Err(format!(
+        "replaying {what} does not give the same journal twice.\n\
+         \x20 First difference on line {line}. A system clock, a thread, or unseeded randomness.\n\
+         \x20 compare {}\n\
+         \x20     and {}",
+        runs[0].0.display(),
+        runs[1].0.display()
+    ))
 }
 
 /// Entry point for the binary that owns a suite:
@@ -349,6 +416,13 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         }
     }
 
+    // First, and on its own: nothing below means anything if the node is not deterministic.
+    match replays_identically(&o, &suite) {
+        Ok(what) if what.is_empty() => {}
+        Ok(what) => println!("deterministic: replaying {what} gives the same journal twice\n"),
+        Err(e) => { eprintln!("NOT DETERMINISTIC: {e}"); return ExitCode::FAILURE }
+    }
+
     let mut all_ok = true;
 
     for c in suite.campaigns {
@@ -358,23 +432,9 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
             }
         }
         // Read once per campaign rather than once per seed: it is the same template every time.
-        let stimuli = if c.stimuli.is_empty() {
-            None
-        } else {
-            let p = o.suite_dir.join(c.stimuli);
-            match std::fs::read_to_string(&p)
-                .map_err(|e| format!("{}: {e}", p.display()))
-                .and_then(|raw| StimulusSpec::from_json(&raw))
-            {
-                Ok(s) => Some(s),
-                Err(e) => { println!("{}: {e}", c.label); all_ok = false; continue }
-            }
-        };
-        let opts = ExpandOpts {
-            fifo: c.fifo,
-            with_faults: c.faults,
-            stimuli,
-            ..ExpandOpts::default()
+        let opts = match expand_opts(&o, c) {
+            Ok(x) => x,
+            Err(e) => { println!("{}: {e}", c.label); all_ok = false; continue }
         };
 
         let seeds = o.seeds.unwrap_or(c.seeds);
@@ -428,10 +488,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         let stem = stem(d.path);
         let dir = o.out.join("directed").join(stem);
         println!("\n{}: {}", d.path, d.why);
-        let sc = match std::fs::read_to_string(&path)
-            .map_err(|e| format!("{}: {e}", path.display()))
-            .and_then(|raw| Scenario::from_json(&raw))
-        {
+        let sc = match load_scenario(&path) {
             Ok(sc) => sc,
             Err(e) => { println!("  did not run: {e}"); all_ok = false; continue }
         };
