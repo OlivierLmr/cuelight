@@ -1,0 +1,9 @@
+[package]
+name = "cuelight-suite"
+version = "0.1.0"
+edition = "2021"
+description = "Run a suite of cuelight scenarios and judge the journals: campaigns over seeds, directed tests, and a verdict"
+
+[dependencies]
+cuelight = { path = ".." }
+serde_json = { version = "1", features = ["preserve_order"] }

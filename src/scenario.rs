@@ -165,6 +165,21 @@ pub struct ExpandOpts {
     pub stimuli: Option<StimulusSpec>,
 }
 
+/// The defaults the command line documents, so a caller using the library as a dependency expands
+/// the same run as someone typing `cuelight run`.
+impl Default for ExpandOpts {
+    fn default() -> Self {
+        ExpandOpts {
+            nodes: d_nodes(),
+            f: d_f(),
+            time_limit: d_limit(),
+            fifo: false,
+            with_faults: true,
+            stimuli: None,
+        }
+    }
+}
+
 impl Scenario {
     pub fn expand(seed: u64, o: &ExpandOpts) -> Scenario {
         let mut r = Rng::new(seed);
