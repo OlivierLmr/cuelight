@@ -97,9 +97,9 @@ The five rounds land in `store/latest/journal.jsonl`. The first three, times inc
 696 n0 saw_pong 1    1200 n0 saw_pong 2    1470 n0 saw_pong 3
 ```
 
-All four languages produce those observations at those times. Three of them line for line: Go's
-JSON encoder sorts the keys of an object, so its bodies carry the same fields in another order. If
-yours matches on times and contents, your plumbing is right.
+All four languages produce that trace line for line. The harness writes every journal in one form,
+with object keys sorted, so the runtimes' own encoders cannot disagree about it. If yours matches,
+your plumbing is right.
 
 ## Where to look
 
@@ -122,6 +122,6 @@ yours matches on times and contents, your plumbing is right.
 
 **What gated a merge.** Several of these pull requests ran past a thousand lines, and I did not
 read them line by line. I read what carried the design and let the rest ride on two things. The
-tests: 28 of them, each one checked to fail when the behaviour it guards breaks, which is a stronger
+tests: 33 of them, each one checked to fail when the behaviour it guards breaks, which is a stronger
 claim than "the tests pass". And use: I used it in the context of my own course, which is where most
 of my corrections came from.
