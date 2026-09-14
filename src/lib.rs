@@ -14,10 +14,10 @@
 //! node, and reads the journal the run writes.
 //!
 //! ```no_run
-//! use cuelight::{EnvironmentSpace, sim, Scenario};
+//! use cuelight::{Space, sim, Scenario};
 //!
-//! let env = EnvironmentSpace::from_json("{}").unwrap();
-//! let sc = Scenario::draw(1, &env, None);
+//! let space = Space::from_json("{}").unwrap();
+//! let sc = Scenario::draw(1, &space);
 //! let outcome = sim::Sim::new(sim::Config {
 //!     program: vec!["python3".into(), "node.py".into()],
 //!     scenario: sc,
@@ -46,6 +46,6 @@ pub mod sim;
 pub mod viz;
 
 pub use scenario::{
-    Drawn, EnvironmentSpace, Fault, Scenario, Span, Stimulus, WorkloadSpace,
+    Bound, Drawn, Effect, Event, Fault, Scenario, Space, Span, Stimulus, Subject,
 };
 pub use sim::{Config, Outcome, Sim};

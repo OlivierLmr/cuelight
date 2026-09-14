@@ -49,11 +49,7 @@ properties are: you hand it a `Suite` and a function, and it calls the function.
 use cuelight_suite::{Events, Kind, Parametric, Report, Scenario, Suite};
 use std::process::ExitCode;
 
-static PARAMETRIC: &[Parametric] = &[Parametric {
-    environment: "environments/steady.json",
-    workload: Some("workloads/steady.json"),
-    seeds: 200,
-}];
+static SPACES: &[Parametric] = &[Parametric { space: "spaces/steady.json", seeds: 200 }];
 
 fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
     r.add("said-something", Kind::Safety, !ev.observes.is_empty(), "...".into());
@@ -61,7 +57,7 @@ fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
 
 fn main() -> ExitCode {
     cuelight_suite::run(
-        Suite { name: "mine", parametric: PARAMETRIC, written: &[], check },
+        Suite { name: "mine", parametric: SPACES, written: &[], check },
         env!("CARGO_MANIFEST_DIR"),
     )
 }
@@ -107,7 +103,7 @@ your plumbing is right.
 
 | | |
 |---|---|
-| [REFERENCE.md](REFERENCE.md) | the wire protocol, the faults, scenarios, workloads, every option |
+| [REFERENCE.md](REFERENCE.md) | the wire protocol, the faults, scenarios, spaces, every option |
 | [JOURNAL.md](JOURNAL.md) | the journal format, which is what your checker parses |
 | [templates/](templates/) | the node runtime in four languages, ninety lines each, and the example above |
 

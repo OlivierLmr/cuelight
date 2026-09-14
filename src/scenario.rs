@@ -38,21 +38,29 @@ pub enum Span<T> {
     Range(T, T),
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SpanRepr<T> {
-    One(T),
-    Two([T; 2]),
-}
-
 impl<'de, T> Deserialize<'de> for Span<T>
 where
-    T: Deserialize<'de> + PartialOrd + std::fmt::Debug,
+    T: serde::de::DeserializeOwned + PartialOrd + std::fmt::Debug,
 {
+    /// Hand-written rather than `#[serde(untagged)]`, which swallows the inner error and reports
+    /// only "data did not match any variant". The author needs to be told what was wrong.
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(match SpanRepr::deserialize(d)? {
-            SpanRepr::One(v) => Span::Pinned(v),
-            SpanRepr::Two([a, b]) => {
+        let v = Value::deserialize(d)?;
+        let pair = match &v {
+            Value::Array(a) if a.len() == 2 => Some((a[0].clone(), a[1].clone())),
+            Value::Array(a) => {
+                return Err(de::Error::custom(format!(
+                    "a range is [low, high]; got {} elements",
+                    a.len()
+                )))
+            }
+            _ => None,
+        };
+        Ok(match pair {
+            None => Span::Pinned(serde_json::from_value(v).map_err(de::Error::custom)?),
+            Some((x, y)) => {
+                let a: T = serde_json::from_value(x).map_err(de::Error::custom)?;
+                let b: T = serde_json::from_value(y).map_err(de::Error::custom)?;
                 // Rejected rather than tolerated. A backwards range would otherwise pin silently
                 // to its first element, and a typo in a bound is invisible from the results.
                 if b < a {
@@ -103,7 +111,68 @@ impl Span<bool> {
     }
 }
 
-// --------------------------------------------------------------------- spaces
+
+// --------------------------------------------------------------------- bounds
+
+/// An integer bound, which may be the fault budget rather than a literal.
+///
+/// `f` is the only symbol the format admits and there is no arithmetic: `[0, "f"]` is the crash
+/// budget, `[1, "f"]` demands at least one. Writing the bound is what buys the ability to *demand*
+/// a crash rather than hope one is drawn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Bound {
+    Fixed(u64),
+    F,
+}
+
+impl Bound {
+    fn get(self, f: u64) -> u64 {
+        match self {
+            Bound::Fixed(v) => v,
+            Bound::F => f,
+        }
+    }
+}
+
+/// `f` sorts above every literal, so the backwards-range check accepts `[0, "f"]` and still
+/// rejects `["f", 0]`. Exact only because no space ever writes a literal above the budget.
+impl PartialOrd for Bound {
+    fn partial_cmp(&self, other: &Bound) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering::*;
+        Some(match (self, other) {
+            (Bound::Fixed(a), Bound::Fixed(b)) => a.cmp(b),
+            (Bound::F, Bound::F) => Equal,
+            (Bound::Fixed(_), Bound::F) => Less,
+            (Bound::F, Bound::Fixed(_)) => Greater,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Bound {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Value::deserialize(d)? {
+            Value::Number(n) if n.is_u64() => Ok(Bound::Fixed(n.as_u64().unwrap())),
+            Value::String(s) if s == "f" => Ok(Bound::F),
+            other => Err(de::Error::custom(format!(
+                "expected an integer or \"f\", got {other}"
+            ))),
+        }
+    }
+}
+
+impl Span<Bound> {
+    fn draw(&self, r: &mut Rng, f: u64) -> u64 {
+        match *self {
+            Span::Pinned(v) => v.get(f),
+            Span::Range(lo, hi) => {
+                let (lo, hi) = (lo.get(f), hi.get(f));
+                if hi > lo { r.range(lo, hi + 1) } else { lo }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------- space
 
 fn s_f() -> Span<u64> { Span::Pinned(1) }
 fn s_limit() -> Span<u64> { Span::Pinned(10_000) }
@@ -112,29 +181,23 @@ fn s_pre() -> Span<u64> { Span::Range(1, 400) }
 fn s_post() -> Span<u64> { Span::Range(1, 25) }
 fn s_jitter() -> Span<u64> { Span::Pinned(100) }
 fn s_fifo() -> Span<bool> { Span::Pinned(false) }
-fn s_one() -> Span<u64> { Span::Range(0, 1) }
-fn s_early() -> Span<f64> { Span::Range(0.0, 0.6) }
-fn s_crash_at() -> Span<f64> { Span::Range(0.0, 0.7) }
-fn s_pause_dur() -> Span<u64> { Span::Range(10, 400) }
-fn s_part_dur() -> Span<u64> { Span::Range(50, 600) }
 
-/// What the system undergoes. Shared across callers: it describes a model of computation, not an
-/// algorithm, so the same file serves every suite that assumes that model.
+/// The set of scenarios a seed draws from: the world a run happens in, and a tree of events.
+///
+/// One file, not two. Faults and stimuli are events of the same tree, because a crash and a
+/// request both have an instant and a subject, and separating them is what made "crash the sender
+/// while it is broadcasting" impossible to say.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EnvironmentSpace {
-    /// The fault budget. The group size follows it, `n = 3f + 1`, so `[1, 3]` sweeps 4, 7 and 10.
-    ///
-    /// Declared this way round because `f` is the free parameter and `n` the consequence. A set of
-    /// group sizes would also be the one place a space held a set rather than a range.
+pub struct Space {
+    /// The fault budget. The group size follows it, `n = 3f + 1`.
     #[serde(default = "s_f")]
     pub f: Span<u64>,
     #[serde(default = "s_limit")]
     pub time_limit: Span<u64>,
-    /// GST as a fraction of the time limit, so there is a window on each side of it.
     #[serde(default = "s_gst_frac")]
     pub gst_frac: Span<f64>,
-    /// Drawn once per ordered pair of nodes. Before GST delays are large, after it they are small.
+    /// Drawn once per ordered pair of processes.
     #[serde(default = "s_pre")]
     pub link_delay_pre: Span<u64>,
     #[serde(default = "s_post")]
@@ -143,150 +206,112 @@ pub struct EnvironmentSpace {
     pub jitter_pct: Span<u64>,
     #[serde(default = "s_fifo")]
     pub fifo: Span<bool>,
-    /// Omitted means none happen. How many is not declared: it follows from `f`, which is the
-    /// definition of the model rather than a setting.
     #[serde(default)]
-    pub crashes: Option<Crashes>,
-    /// Not budgeted against `f`: a pause is an omission, not a crash. Hence a count of its own.
-    #[serde(default)]
-    pub pauses: Option<Pauses>,
-    #[serde(default)]
-    pub partitions: Option<Partitions>,
+    pub events: Vec<Event>,
+}
+
+/// Who an event acts on, and how many copies of it there are.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Subject {
+    /// Every process, once each.
+    #[serde(rename = "all")]
+    All,
+    /// k processes not already taken on the path from the root, so under a parent it reads as
+    /// "someone other than mine".
+    Distinct(Span<Bound>),
+    /// k draws with replacement; the parent's own process may come up again.
+    Any(Span<Bound>),
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Crashes {
-    #[serde(default = "s_crash_at")]
-    pub at_frac: Span<f64>,
+#[serde(rename_all = "snake_case")]
+pub enum Effect {
+    /// Body handed to the node untouched. The tool never reads it: an event name belongs to a
+    /// caller, and that is knowledge this crate must not hold.
+    Stimulus(Value),
+    Crash,
+    Pause { duration: Span<u64> },
+    /// Cuts a proper non-empty subset from the rest. Its size is drawn, not declared, because
+    /// that is what a partition *is*.
+    Partition { duration: Span<u64> },
 }
 
+/// One node of the event tree.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Pauses {
-    #[serde(default = "s_one")]
-    pub count: Span<u64>,
-    #[serde(default = "s_early")]
-    pub at_frac: Span<f64>,
-    #[serde(default = "s_pause_dur")]
-    pub duration: Span<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Partitions {
-    #[serde(default = "s_one")]
-    pub count: Span<u64>,
-    #[serde(default = "s_early")]
-    pub at_frac: Span<f64>,
-    #[serde(default = "s_part_dur")]
-    pub duration: Span<u64>,
-}
-
-impl EnvironmentSpace {
-    pub fn from_json(s: &str) -> Result<EnvironmentSpace, String> {
-        serde_json::from_str(s).map_err(|e| format!("bad environment space: {e}"))
-    }
-}
-
-/// What the system is asked to do. Belongs to one caller: `do_broadcast`, `request_cs` and
-/// `propose` are its event names, and an event name is exactly the knowledge this tool must not
-/// carry.
-///
-/// ```json
-/// { "stimuli": [ { "id": "req", "count": [3, 9], "at_frac": [0.0, 0.5],
-///                  "body": { "type": "request_cs" } },
-///                { "after": "req", "delay": [1, 20],
-///                  "body": { "type": "request_cs" } } ] }
-/// ```
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkloadSpace {
-    pub stimuli: Vec<StimulusRule>,
-}
-
-/// One group of stimuli. Either free-standing, drawing its own count and instants, or following an
-/// earlier group.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StimulusRule {
-    /// Names this group so a later one may follow it.
+pub struct Event {
+    /// Binds a process, which children inherit unless they name their own. Absent on a child means
+    /// "my parent's process"; absent on a root means the effect acts on no one in particular.
     #[serde(default)]
-    pub id: Option<String>,
-    /// Follow an earlier group: one event per event of it, on the same node.
-    ///
-    /// Uniform instants hit "release, then immediately ask again" rarely, and that shape is where
-    /// a whole class of bugs lives.
+    pub nodes: Option<Subject>,
+    /// How many copies, for an effect that acts on no single process. Mutually exclusive with
+    /// `nodes`.
     #[serde(default)]
-    pub after: Option<String>,
-    /// How long after the event it follows. Only meaningful with `after`.
-    #[serde(default)]
-    pub delay: Option<Span<u64>>,
-    #[serde(default)]
-    pub count: Option<Span<u64>>,
-    /// Instant as a fraction of the time limit. There is no absolute form: the limit lives in the
-    /// environment, so an absolute instant would mean something different in each pairing.
+    pub count: Option<Span<Bound>>,
+    /// Roots only: a fraction of the time limit.
     #[serde(default)]
     pub at_frac: Option<Span<f64>>,
-    /// One event per node, in order, instead of a drawn count and a drawn node.
+    /// Children only: how long after the parent. Never negative, so a child never precedes its
+    /// parent and the tree admits no cycle.
     #[serde(default)]
-    pub per_node: bool,
-    pub body: Value,
+    pub delay: Option<Span<u64>>,
+    #[serde(flatten)]
+    pub effect: Effect,
+    #[serde(default)]
+    pub then: Vec<Event>,
 }
 
-impl WorkloadSpace {
-    pub fn from_json(s: &str) -> Result<WorkloadSpace, String> {
-        let w: WorkloadSpace =
-            serde_json::from_str(s).map_err(|e| format!("bad workload space: {e}"))?;
-        w.validate()?;
-        Ok(w)
+impl Space {
+    pub fn from_json(s: &str) -> Result<Space, String> {
+        let sp: Space = serde_json::from_str(s).map_err(|e| format!("bad space: {e}"))?;
+        sp.validate()?;
+        Ok(sp)
     }
 
-    /// Rejected here rather than ignored during the draw: a rule that cannot mean what it says is
-    /// a mistake in the file, and a silent one would show up as a workload nobody asked for.
+    /// Rejected at read time rather than ignored during the draw: a field that cannot mean what it
+    /// says is a mistake in the file, and a silent one shows up as a run nobody asked for.
     fn validate(&self) -> Result<(), String> {
-        let mut seen: Vec<&str> = Vec::new();
-        for (i, rule) in self.stimuli.iter().enumerate() {
-            match &rule.after {
-                Some(target) => {
-                    if !seen.contains(&target.as_str()) {
-                        return Err(format!(
-                            "stimulus group {i}: `after` names {target:?}, which is not an earlier \
-                             group's `id`. Referring only backwards is what makes a cycle impossible."
-                        ));
-                    }
-                    if rule.count.is_some() || rule.at_frac.is_some() || rule.per_node {
-                        return Err(format!(
-                            "stimulus group {i}: with `after`, the count and the instants come from \
-                             the group it follows, so `count`, `at_frac` and `per_node` have no meaning"
-                        ));
-                    }
+        fn walk(events: &[Event], root: bool, where_: &str) -> Result<(), String> {
+            for (i, e) in events.iter().enumerate() {
+                let at = format!("{where_}[{i}]");
+                if e.nodes.is_some() && e.count.is_some() {
+                    return Err(format!("{at}: `nodes` and `count` both say how many; pick one"));
                 }
-                None => {
-                    if rule.delay.is_some() {
-                        return Err(format!(
-                            "stimulus group {i}: `delay` is relative to the group named by `after`, \
-                             and this group follows none"
-                        ));
-                    }
+                if root && e.delay.is_some() {
+                    return Err(format!("{at}: `delay` is relative to a parent, and this is a root"));
                 }
+                if root && e.at_frac.is_none() {
+                    return Err(format!("{at}: a root needs `at_frac`"));
+                }
+                if !root && e.at_frac.is_some() {
+                    return Err(format!(
+                        "{at}: `at_frac` places a root; a child is placed by `delay` from its parent"
+                    ));
+                }
+                if root && e.nodes.is_none() && !e.then.is_empty() {
+                    return Err(format!(
+                        "{at}: this root binds no process, so its children have nothing to inherit"
+                    ));
+                }
+                if e.count.is_some() && !e.then.is_empty() {
+                    return Err(format!(
+                        "{at}: `count` binds no process, so its children have nothing to inherit"
+                    ));
+                }
+                walk(&e.then, false, &at)?;
             }
-            if let Some(id) = &rule.id {
-                if seen.contains(&id.as_str()) {
-                    return Err(format!("stimulus group {i}: `id` {id:?} is already taken"));
-                }
-                seen.push(id);
-            }
+            Ok(())
         }
-        Ok(())
+        walk(&self.events, true, "events")
     }
 }
 
-/// A fingerprint of the spaces a scenario was drawn from, and of the draw itself.
+/// A fingerprint of the space a scenario was drawn from, and of the draw itself.
 ///
 /// Editing a space repoints every seed: seed 47 stops meaning the run it meant yesterday, and
 /// nothing fails to say so. Carrying this makes that loud.
-pub fn fingerprint(environment: &str, workload: Option<&str>) -> String {
+pub fn fingerprint(space: &str) -> String {
     let mut h: u64 = 0xCBF2_9CE4_8422_2325;
     let mut eat = |bytes: &[u8]| {
         for b in bytes {
@@ -295,18 +320,14 @@ pub fn fingerprint(environment: &str, workload: Option<&str>) -> String {
         }
     };
     eat(&DRAW_VERSION.to_le_bytes());
-    for src in [Some(environment), workload].into_iter().flatten() {
-        // Canonical bytes, so reformatting a space file is not mistaken for changing it.
-        let text = match serde_json::from_str::<Value>(src) {
-            Ok(v) => canonical(&v).to_string(),
-            Err(_) => src.to_string(),
-        };
-        eat(text.as_bytes());
-        eat(b"\0");
-    }
+    // Canonical bytes, so reformatting a space file is not mistaken for changing it.
+    let text = match serde_json::from_str::<Value>(space) {
+        Ok(v) => canonical(&v).to_string(),
+        Err(_) => space.to_string(),
+    };
+    eat(text.as_bytes());
     format!("{h:016x}")
 }
-
 // ------------------------------------------------------------------ scenarios
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,9 +362,7 @@ pub struct Stimulus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Drawn {
     pub seed: u64,
-    pub environment: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workload: Option<String>,
+    pub space: String,
     /// See [`fingerprint`]. A seed names a run only relative to the spaces it was drawn from.
     pub fingerprint: String,
 }
@@ -402,22 +421,24 @@ pub struct Scenario {
     pub stimuli: Vec<Stimulus>,
 }
 
+
 impl Scenario {
-    /// Draw a scenario from a seed and two spaces.
+    /// Draw a scenario from a seed and a space.
     ///
-    /// The draw order is fixed here, by the order of these statements, and never by the order of
-    /// keys in a space file: reordering two keys must not repoint every stored seed. It is part of
-    /// what a seed means, so changing it means bumping [`DRAW_VERSION`].
-    pub fn draw(seed: u64, env: &EnvironmentSpace, work: Option<&WorkloadSpace>) -> Scenario {
+    /// The draw order is the depth-first walk of the event tree, and within an event: subject,
+    /// then placement, then the body's `$rand`s, then children. It is fixed here and never by the
+    /// order of keys in a file. Inserting a sibling repoints every seed after it; that is inherent,
+    /// and [`fingerprint`] is what makes it loud.
+    pub fn draw(seed: u64, space: &Space) -> Scenario {
         let mut r = Rng::new(seed);
 
         // Capped so the subset mask a partition draws stays inside a u64. Far above any real group.
-        let f = env.f.draw(&mut r).min(20);
+        let f = space.f.draw(&mut r).min(20);
         let n = (3 * f + 1) as usize;
         let names: Vec<String> = (0..n).map(|i| format!("n{i}")).collect();
 
-        let time_limit = env.time_limit.draw(&mut r).max(2);
-        let gst = ((env.gst_frac.draw(&mut r) * time_limit as f64) as u64).min(time_limit);
+        let time_limit = space.time_limit.draw(&mut r).max(2);
+        let gst = ((space.gst_frac.draw(&mut r) * time_limit as f64) as u64).min(time_limit);
 
         let mut delay_pre = vec![vec![0u64; n]; n];
         let mut delay_post = vec![vec![0u64; n]; n];
@@ -426,72 +447,21 @@ impl Scenario {
                 if i == j {
                     continue;
                 }
-                delay_pre[i][j] = env.link_delay_pre.draw(&mut r).max(1);
-                delay_post[i][j] = env.link_delay_post.draw(&mut r).max(1);
+                delay_pre[i][j] = space.link_delay_pre.draw(&mut r).max(1);
+                delay_post[i][j] = space.link_delay_post.draw(&mut r).max(1);
             }
         }
 
-        let jitter_pct = env.jitter_pct.draw(&mut r);
-        let fifo = env.fifo.draw(&mut r);
-        let last = time_limit - 1;
+        let jitter_pct = space.jitter_pct.draw(&mut r);
+        let fifo = space.fifo.draw(&mut r);
 
-        let mut faults: Vec<Fault> = Vec::new();
-        let mut crashed: Vec<usize> = Vec::new();
-
-        if let Some(c) = &env.crashes {
-            // Bounded by f: the model's premise, not a setting a space gets to make.
-            let k = r.range(0, f + 1);
-            for _ in 0..k {
-                // Every value is drawn before anything is skipped, so a collision does not shift
-                // the rest of the stream.
-                let victim = r.range(0, n as u64) as usize;
-                let at = ((c.at_frac.draw(&mut r) * time_limit as f64) as u64).clamp(1, last);
-                if crashed.contains(&victim) {
-                    continue;
-                }
-                crashed.push(victim);
-                faults.push(Fault::Crash { at, node: names[victim].clone() });
-            }
+        let mut d = Draw { r: &mut r, f, n, names: &names, time_limit, faults: vec![], stimuli: vec![] };
+        for ev in &space.events {
+            d.visit(ev, None, &[]);
         }
-
-        if let Some(p) = &env.pauses {
-            let k = p.count.draw(&mut r);
-            for _ in 0..k {
-                let victim = r.range(0, n as u64) as usize;
-                let at = ((p.at_frac.draw(&mut r) * time_limit as f64) as u64).clamp(1, last);
-                let duration = p.duration.draw(&mut r).max(1);
-                if crashed.contains(&victim) {
-                    continue;
-                }
-                faults.push(Fault::Pause { at, node: names[victim].clone(), duration });
-            }
-        }
-
-        if let Some(p) = &env.partitions {
-            // Heal well before the end: a split still open at the limit makes any convergence
-            // check meaningless, because the run would end mid-disagreement.
-            let latest_heal = time_limit * 8 / 10;
-            // Two sides need two nodes: a proper non-empty subset of a group of one has no answer.
-            let k = if n < 2 { 0 } else { p.count.draw(&mut r) };
-            for _ in 0..k {
-                let at = ((p.at_frac.draw(&mut r) * time_limit as f64) as u64).clamp(1, last);
-                let duration =
-                    p.duration.draw(&mut r).max(1).min(latest_heal.saturating_sub(at).max(1));
-                // A proper non-empty subset, drawn as a mask. Taking a prefix of the node list
-                // instead would put n0 on the small side of every partition ever drawn.
-                let mask = r.range(1, (1u64 << n) - 1);
-                let side: Vec<String> =
-                    (0..n).filter(|i| mask >> i & 1 == 1).map(|i| names[i].clone()).collect();
-                faults.push(Fault::Partition { at, duration, side });
-            }
-        }
-
+        let (mut faults, mut stimuli) = (d.faults, d.stimuli);
         faults.sort_by_key(|f| f.at());
-
-        let stimuli = match work {
-            None => Vec::new(),
-            Some(w) => Self::workload(&mut r, w, &names, time_limit),
-        };
+        stimuli.sort_by_key(|s| s.at);
 
         Scenario {
             drawn: None,
@@ -509,78 +479,132 @@ impl Scenario {
             stimuli,
         }
     }
+}
 
+/// The state a walk of the event tree carries.
+struct Draw<'a> {
+    r: &'a mut Rng,
+    f: u64,
+    n: usize,
+    names: &'a [String],
+    time_limit: u64,
+    faults: Vec<Fault>,
+    stimuli: Vec<Stimulus>,
+}
+
+impl Draw<'_> {
+    /// Instantiate one event and its subtree.
+    ///
+    /// `parent` carries the instant to place against and the process to inherit; `taken` carries
+    /// the processes already bound on the path, which is what makes `distinct` mean "someone other
+    /// than mine" under a parent and "distinct from each other" at the root.
+    fn visit(&mut self, ev: &Event, parent: Option<(u64, Option<usize>)>, taken: &[usize]) {
+        let subjects: Vec<Option<usize>> = match (&ev.nodes, &ev.count) {
+            (Some(sub), _) => self.pick(sub, taken).into_iter().map(Some).collect(),
+            (None, Some(c)) => vec![None; c.draw(self.r, self.f) as usize],
+            (None, None) => vec![parent.and_then(|(_, who)| who)],
+        };
+
+        for (i, who) in subjects.into_iter().enumerate() {
+            let at = match parent {
+                None => {
+                    let frac = ev.at_frac.as_ref().map(|s| s.draw(self.r)).unwrap_or(0.0);
+                    (frac * self.time_limit as f64) as u64
+                }
+                Some((pt, _)) => pt.saturating_add(ev.delay.map(|s| s.draw(self.r)).unwrap_or(0)),
+            };
+            self.emit(&ev.effect, at, who, i as u64);
+
+            if !ev.then.is_empty() {
+                let mut deeper = taken.to_vec();
+                if let Some(w) = who {
+                    deeper.push(w);
+                }
+                for child in &ev.then {
+                    self.visit(child, Some((at, who)), &deeper);
+                }
+            }
+        }
+    }
+
+    /// The processes an event acts on.
+    ///
+    /// `distinct` uses a partial Fisher-Yates shuffle rather than rejection sampling: rejection
+    /// consumes a number of draws that depends on collisions, hence on `n`, and the stream would
+    /// shift unpredictably. This consumes exactly k.
+    fn pick(&mut self, sub: &Subject, taken: &[usize]) -> Vec<usize> {
+        match sub {
+            Subject::All => (0..self.n).collect(),
+            Subject::Any(k) => {
+                let k = k.draw(self.r, self.f) as usize;
+                (0..k).map(|_| self.r.range(0, self.n as u64) as usize).collect()
+            }
+            Subject::Distinct(k) => {
+                let want = k.draw(self.r, self.f) as usize;
+                let mut pool: Vec<usize> = (0..self.n).filter(|i| !taken.contains(i)).collect();
+                let k = want.min(pool.len());
+                for i in 0..k {
+                    let j = i + self.r.range(0, (pool.len() - i) as u64) as usize;
+                    pool.swap(i, j);
+                }
+                pool.truncate(k);
+                pool
+            }
+        }
+    }
+
+    /// Every value an effect needs is drawn before anything is skipped, so an event bound to no
+    /// process does not shift the rest of the stream.
+    fn emit(&mut self, eff: &Effect, at: u64, who: Option<usize>, i: u64) {
+        match eff {
+            Effect::Stimulus(body) => {
+                let body = render(body, i, self.r);
+                if let Some(w) = who {
+                    self.stimuli.push(Stimulus { at, node: self.names[w].clone(), body });
+                }
+            }
+            Effect::Crash => {
+                if let Some(w) = who {
+                    let name = self.names[w].clone();
+                    let already = self
+                        .faults
+                        .iter()
+                        .any(|f| matches!(f, Fault::Crash { node, .. } if *node == name));
+                    if !already {
+                        self.faults.push(Fault::Crash { at, node: name });
+                    }
+                }
+            }
+            Effect::Pause { duration } => {
+                let d = duration.draw(self.r).max(1);
+                if let Some(w) = who {
+                    self.faults.push(Fault::Pause { at, node: self.names[w].clone(), duration: d });
+                }
+            }
+            Effect::Partition { duration } => {
+                let d = duration.draw(self.r).max(1);
+                // Two sides need two processes: a proper non-empty subset of a group of one has no
+                // answer. Taking a prefix instead of a drawn subset would put n0 on the small side
+                // of every partition ever drawn.
+                if self.n >= 2 {
+                    let mask = self.r.range(1, (1u64 << self.n) - 1);
+                    let side = (0..self.n)
+                        .filter(|i| mask >> i & 1 == 1)
+                        .map(|i| self.names[i].clone())
+                        .collect();
+                    self.faults.push(Fault::Partition { at, duration: d, side });
+                }
+            }
+        }
+    }
+}
+
+impl Scenario {
     /// Record where this was drawn from. Kept off [`Scenario::draw`] so the draw stays a function
     /// of the spaces alone, not of where they happened to be stored.
     pub fn from(mut self, d: Drawn) -> Scenario {
         self.drawn = Some(d);
         self
-    }
-
-    /// Expand the caller's workload. No space, no stimuli: the harness invents none of its own.
-    ///
-    /// Groups are drawn in file order; within a group, `count` first, then per event the node, the
-    /// instant, and the body's `$rand`s. A group that follows another draws one delay per event of
-    /// the group it follows.
-    fn workload(
-        r: &mut Rng,
-        w: &WorkloadSpace,
-        names: &[String],
-        time_limit: u64,
-    ) -> Vec<Stimulus> {
-        let n = names.len() as u64;
-        let last = time_limit - 1;
-        let mut out: Vec<Stimulus> = Vec::new();
-        // Indices into `out`, resolved before the sort below, which is why `after` can address
-        // them at all.
-        let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
-
-        for rule in &w.stimuli {
-            let mut mine: Vec<usize> = Vec::new();
-            match &rule.after {
-                Some(target) => {
-                    let base: Vec<usize> = groups
-                        .iter()
-                        .find(|(id, _)| *id == target.as_str())
-                        .map(|(_, ix)| ix.clone())
-                        .unwrap_or_default();
-                    let span = rule.delay.unwrap_or(Span::Pinned(1));
-                    for (i, bi) in base.into_iter().enumerate() {
-                        let d = span.draw(r).max(1);
-                        let at = out[bi].at.saturating_add(d).min(last);
-                        let node = out[bi].node.clone();
-                        let body = render(&rule.body, i as u64, r);
-                        mine.push(out.len());
-                        out.push(Stimulus { at, node, body });
-                    }
-                }
-                None => {
-                    if rule.per_node {
-                        for (i, name) in names.iter().enumerate() {
-                            let at = instant(r, &rule.at_frac, time_limit);
-                            let body = render(&rule.body, i as u64, r);
-                            mine.push(out.len());
-                            out.push(Stimulus { at, node: name.clone(), body });
-                        }
-                    } else {
-                        let k = rule.count.unwrap_or(Span::Pinned(1)).draw(r);
-                        for i in 0..k {
-                            let who = r.range(0, n) as usize;
-                            let at = instant(r, &rule.at_frac, time_limit);
-                            let body = render(&rule.body, i, r);
-                            mine.push(out.len());
-                            out.push(Stimulus { at, node: names[who].clone(), body });
-                        }
-                    }
-                }
-            }
-            if let Some(id) = &rule.id {
-                groups.push((id.as_str(), mine));
-            }
-        }
-
-        out.sort_by_key(|s| s.at);
-        out
     }
 
     /// Delay for the `idx`-th message on link `from -> to`, sent at `now`.
@@ -628,13 +652,6 @@ impl Scenario {
     }
 }
 
-fn instant(r: &mut Rng, at_frac: &Option<Span<f64>>, time_limit: u64) -> u64 {
-    match at_frac {
-        Some(s) => ((s.draw(r) * time_limit as f64) as u64).min(time_limit - 1),
-        None => 0,
-    }
-}
-
 /// Substitute `<i>` in strings and resolve `{"$rand": [lo, hi]}` objects, inclusive.
 ///
 /// Keys are walked in sorted order, not document order. Depth-first over the document would make
@@ -663,21 +680,21 @@ fn render(t: &Value, i: u64, r: &mut Rng) -> Value {
 mod tests {
     use super::*;
 
-    fn env(src: &str) -> EnvironmentSpace {
-        EnvironmentSpace::from_json(src).expect("environment parses")
+    fn space(src: &str) -> Space {
+        Space::from_json(src).expect("space parses")
     }
-    fn work(src: &str) -> WorkloadSpace {
-        WorkloadSpace::from_json(src).expect("workload parses")
+    fn nodes_of(sc: &Scenario) -> Vec<&str> {
+        sc.stimuli.iter().map(|s| s.node.as_str()).collect()
     }
 
-    /// A golden test on the one thing that must never drift silently. Seeds address stored runs and
-    /// reproduce reported bugs; if the draw changes, all of those quietly start meaning something
-    /// else. A failure here is either a regression or a deliberate break that has to be announced
-    /// by bumping DRAW_VERSION.
+    /// A golden test on the one thing that must never drift silently. Seeds address stored runs;
+    /// if the draw changes, all of them quietly start meaning something else. A failure here is
+    /// either a regression or a deliberate break, announced by bumping DRAW_VERSION.
     #[test]
     fn the_draw_is_pinned() {
-        let e = env(r#"{"f": 1, "fifo": true, "crashes": {}}"#);
-        let sc = Scenario::draw(3, &e, None);
+        let sp = space(r#"{"f": 1, "fifo": true,
+            "events": [{"nodes": {"distinct": [0, "f"]}, "at_frac": [0.0, 0.7], "crash": {}}]}"#);
+        let sc = Scenario::draw(3, &sp);
         assert_eq!((sc.nodes, sc.f), (4, 1));
         assert_eq!(sc.gst, 2855);
         assert_eq!(sc.delay_pre[0], vec![0, 362, 48, 136]);
@@ -688,28 +705,145 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------------ the subject
+
     #[test]
-    fn a_scalar_and_a_range_of_width_zero_are_the_same_thing() {
-        // Not just the same value: the same run. A width-zero range must draw nothing, or the two
-        // ways of pinning a field would mean different things.
-        let e = r#"{"f": F, "crashes": {}, "pauses": {"count": [0, 2]}}"#;
+    fn all_selects_every_process_once_in_order() {
+        let sp = space(r#"{"f": 1, "events":
+            [{"nodes": "all", "at_frac": 0.1, "stimulus": {"type": "x"}}]}"#);
+        assert_eq!(nodes_of(&Scenario::draw(1, &sp)), vec!["n0", "n1", "n2", "n3"]);
+    }
+
+    #[test]
+    fn distinct_never_repeats_and_any_may() {
+        let d = space(r#"{"f": 3, "events":
+            [{"nodes": {"distinct": [10, 10]}, "at_frac": 0.1, "stimulus": {"type": "x"}}]}"#);
+        for seed in 1..40 {
+            let sc = Scenario::draw(seed, &d);
+            let got = nodes_of(&sc);
+            let mut uniq = got.clone();
+            uniq.sort();
+            uniq.dedup();
+            assert_eq!(uniq.len(), got.len(), "seed {seed}: distinct repeated a process");
+        }
+        // With replacement, ten draws from ten processes repeat somewhere almost always.
+        let a = space(r#"{"f": 3, "events":
+            [{"nodes": {"any": [10, 10]}, "at_frac": 0.1, "stimulus": {"type": "x"}}]}"#);
+        let repeated = (1..40).filter(|s| {
+            let sc = Scenario::draw(*s, &a);
+            let got = nodes_of(&sc);
+            let mut u = got.clone();
+            u.sort();
+            u.dedup();
+            u.len() < got.len()
+        });
+        assert!(repeated.count() > 30, "`any` behaved like `distinct`");
+    }
+
+    #[test]
+    fn distinct_asked_for_more_than_exist_gives_what_exists() {
+        let sp = space(r#"{"f": 1, "events":
+            [{"nodes": {"distinct": [99, 99]}, "at_frac": 0.1, "stimulus": {"type": "x"}}]}"#);
+        assert_eq!(Scenario::draw(1, &sp).stimuli.len(), 4);
+    }
+
+    #[test]
+    fn the_f_symbol_is_the_fault_budget() {
+        let sp = space(r#"{"f": [1, 3], "events":
+            [{"nodes": {"distinct": ["f", "f"]}, "at_frac": 0.1, "crash": {}}]}"#);
+        for seed in 1..60 {
+            let sc = Scenario::draw(seed, &sp);
+            assert_eq!(sc.faults.len(), sc.f, "seed {seed}: f crashes expected");
+        }
+    }
+
+    // --------------------------------------------------------------- the tree
+
+    #[test]
+    fn a_child_acts_on_its_parents_process() {
+        // The whole reason the language has no variables: the tree carries the binding.
+        let sp = space(r#"{"f": 1, "events": [
+            {"nodes": {"distinct": 1}, "at_frac": 0.1, "stimulus": {"type": "send"},
+             "then": [{"delay": [5, 5], "crash": {}}]}]}"#);
+        for seed in 1..40 {
+            let sc = Scenario::draw(seed, &sp);
+            let who = sc.stimuli[0].node.clone();
+            match &sc.faults[0] {
+                Fault::Crash { at, node } => {
+                    assert_eq!(*node, who, "seed {seed}: the crash left its parent's process");
+                    assert_eq!(*at, sc.stimuli[0].at + 5);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_child_naming_its_own_subject_leaves_the_parents() {
+        // `distinct` under a parent means "other than mine": one process broadcasts, another acts.
+        let sp = space(r#"{"f": 1, "events": [
+            {"nodes": {"distinct": 1}, "at_frac": 0.1, "stimulus": {"type": "a"},
+             "then": [{"nodes": {"distinct": 1}, "delay": [1, 9], "stimulus": {"type": "b"}}]}]}"#);
+        for seed in 1..40 {
+            let sc = Scenario::draw(seed, &sp);
+            let a = sc.stimuli.iter().find(|s| s.body["type"] == "a").unwrap();
+            let b = sc.stimuli.iter().find(|s| s.body["type"] == "b").unwrap();
+            assert_ne!(a.node, b.node, "seed {seed}");
+            assert!((1..=9).contains(&(b.at - a.at)));
+        }
+    }
+
+    #[test]
+    fn a_zero_delay_is_the_same_logical_instant() {
+        // This is `together`, and it is not a construct: it is a delay of zero.
+        let sp = space(r#"{"f": 1, "events": [
+            {"nodes": "all", "at_frac": 0.1, "stimulus": {"type": "a"},
+             "then": [{"delay": 0, "stimulus": {"type": "b"}}]}]}"#);
+        let sc = Scenario::draw(1, &sp);
+        assert_eq!(sc.stimuli.len(), 8);
+        assert!(sc.stimuli.iter().all(|s| s.at == sc.stimuli[0].at));
+    }
+
+    #[test]
+    fn the_tree_multiplies() {
+        // A subtree is instantiated once per selected process, which is what makes inheritance
+        // work and what makes a deep tree unreadable.
+        let sp = space(r#"{"f": 1, "events": [
+            {"nodes": {"distinct": [3, 3]}, "at_frac": 0.1, "stimulus": {"type": "a"},
+             "then": [{"nodes": {"any": [2, 2]}, "delay": 1, "stimulus": {"type": "b"}}]}]}"#);
+        let sc = Scenario::draw(1, &sp);
+        assert_eq!(sc.stimuli.iter().filter(|s| s.body["type"] == "a").count(), 3);
+        assert_eq!(sc.stimuli.iter().filter(|s| s.body["type"] == "b").count(), 6);
+    }
+
+    #[test]
+    fn count_repeats_an_event_that_binds_nobody() {
+        let sp = space(r#"{"f": 1, "events":
+            [{"count": [3, 3], "at_frac": [0.1, 0.5], "partition": {"duration": [10, 20]}}]}"#);
+        assert_eq!(Scenario::draw(1, &sp).faults.len(), 3);
+    }
+
+    // -------------------------------------------------------------- the world
+
+    #[test]
+    fn a_scalar_and_a_range_of_width_zero_are_the_same_run() {
+        let e = r#"{"f": F, "events": [{"nodes": {"distinct": [0, "f"]}, "at_frac": 0.3, "crash": {}}]}"#;
         for seed in 1..30 {
-            let scalar = Scenario::draw(seed, &env(&e.replace("F", "2")), None);
-            let range = Scenario::draw(seed, &env(&e.replace("F", "[2, 2]")), None);
-            assert_eq!(scalar.to_json(), range.to_json(), "seed {seed}");
+            let a = Scenario::draw(seed, &space(&e.replace("F", "2")));
+            let b = Scenario::draw(seed, &space(&e.replace("F", "[2, 2]")));
+            assert_eq!(a.to_json(), b.to_json(), "seed {seed}");
         }
     }
 
     #[test]
     fn changing_a_pinned_field_changes_that_field_and_nothing_else() {
-        // True of fields carried straight into the scenario. `f` decides the group size and
-        // `time_limit` scales every instant, so pinning either moves far more than itself.
-        let base = r#"{"f": 2, "crashes": {}, "pauses": {"count": [0, 2]}, "#;
-        let quiet = env(&format!(r#"{base}"jitter_pct": 100, "fifo": false}}"#));
-        let loud = env(&format!(r#"{base}"jitter_pct": 900, "fifo": true}}"#));
+        let base = r#"{"f": 2, "jitter_pct": J, "fifo": B, "events":
+            [{"nodes": {"distinct": [0, "f"]}, "at_frac": [0.0, 0.7], "crash": {}}]}"#;
+        let quiet = space(&base.replace("J", "100").replace("B", "false"));
+        let loud = space(&base.replace("J", "900").replace("B", "true"));
         for seed in 1..30 {
-            let a = Scenario::draw(seed, &quiet, None);
-            let b = Scenario::draw(seed, &loud, None);
+            let a = Scenario::draw(seed, &quiet);
+            let b = Scenario::draw(seed, &loud);
             assert_eq!((a.jitter_pct, a.fifo), (100, false));
             assert_eq!((b.jitter_pct, b.fifo), (900, true));
             assert_eq!((a.gst, &a.delay_pre), (b.gst, &b.delay_pre), "seed {seed}");
@@ -718,422 +852,94 @@ mod tests {
     }
 
     #[test]
-    fn integer_ranges_are_inclusive() {
-        // [2, 2] is one value, not an empty half-open interval, and [1, 3] can reach 3.
-        let two = env(r#"{"f": [2, 2]}"#);
-        assert_eq!(Scenario::draw(1, &two, None).f, 2);
-        let sizes: Vec<usize> =
-            (1..80).map(|s| Scenario::draw(s, &env(r#"{"f": [1, 3]}"#), None).nodes).collect();
-        assert!(sizes.contains(&4) && sizes.contains(&7) && sizes.contains(&10));
-        assert!(sizes.iter().all(|n| [4, 7, 10].contains(n)), "n = 3f+1 for f in 1..=3");
-    }
-
-    #[test]
     fn the_group_size_follows_the_fault_budget() {
         for f in 1..=4u64 {
-            let sc = Scenario::draw(7, &env(&format!(r#"{{"f": {f}}}"#)), None);
-            assert_eq!(sc.nodes, (3 * f + 1) as usize);
-            assert_eq!(sc.f, f as usize);
+            let sc = Scenario::draw(7, &space(&format!(r#"{{"f": {f}}}"#)));
+            assert_eq!((sc.nodes, sc.f), ((3 * f + 1) as usize, f as usize));
         }
     }
 
     #[test]
-    fn crashes_are_bounded_by_f_and_faults_are_ordered() {
-        let e = env(r#"{"f": [1, 3], "crashes": {}, "pauses": {"count": [0, 2]}}"#);
-        for seed in 1..120 {
-            let sc = Scenario::draw(seed, &e, None);
-            assert!(sc.faults.windows(2).all(|w| w[0].at() <= w[1].at()));
-            let crashes = sc.faults.iter().filter(|f| matches!(f, Fault::Crash { .. })).count();
-            assert!(crashes <= sc.f, "seed {seed}: {crashes} crashes for f={}", sc.f);
-        }
+    fn integer_ranges_are_inclusive() {
+        let sizes: Vec<usize> =
+            (1..80).map(|s| Scenario::draw(s, &space(r#"{"f": [1, 3]}"#)).nodes).collect();
+        assert!(sizes.contains(&4) && sizes.contains(&7) && sizes.contains(&10));
+        assert!(sizes.iter().all(|n| [4, 7, 10].contains(n)));
     }
 
     #[test]
     fn a_partition_is_a_proper_non_empty_subset_and_not_always_a_prefix() {
-        let e = env(r#"{"f": 3, "partitions": {"count": 1}}"#);
+        let sp = space(r#"{"f": 3, "events":
+            [{"count": 1, "at_frac": [0.1, 0.5], "partition": {"duration": [10, 20]}}]}"#);
         let mut non_prefix = 0;
         for seed in 1..120 {
-            let sc = Scenario::draw(seed, &e, None);
-            let sides: Vec<&Vec<String>> = sc
-                .faults
-                .iter()
-                .filter_map(|f| match f {
-                    Fault::Partition { side, .. } => Some(side),
-                    _ => None,
-                })
-                .collect();
-            for side in sides {
+            let sc = Scenario::draw(seed, &sp);
+            for f in &sc.faults {
+                let Fault::Partition { side, .. } = f else { panic!("{f:?}") };
                 assert!(!side.is_empty() && side.len() < sc.nodes, "seed {seed}: {side:?}");
-                let prefix: Vec<String> =
-                    (0..side.len()).map(|i| format!("n{i}")).collect();
+                let prefix: Vec<String> = (0..side.len()).map(|i| format!("n{i}")).collect();
                 if *side != prefix {
                     non_prefix += 1;
                 }
             }
         }
-        // Drawing a prefix would put n0 on the small side of every partition ever drawn, which is
-        // what this replaced.
-        assert!(non_prefix > 50, "only {non_prefix} partitions were not a prefix");
+        assert!(non_prefix > 60, "only {non_prefix} partitions were not a prefix");
     }
 
     #[test]
-    fn no_workload_means_no_stimuli() {
-        // The tool ships none of its own: without a caller-supplied space it invents none.
-        assert!(Scenario::draw(1, &env(r#"{"f": 1, "crashes": {}}"#), None).stimuli.is_empty());
+    fn a_group_of_one_process_cannot_be_partitioned() {
+        let sp = space(r#"{"f": 0, "events":
+            [{"count": 3, "at_frac": 0.1, "partition": {"duration": 10}}]}"#);
+        let sc = Scenario::draw(1, &sp);
+        assert_eq!(sc.nodes, 1);
+        assert!(sc.faults.is_empty());
     }
 
     #[test]
-    fn the_workload_does_not_disturb_the_environment() {
-        // Workload draws come last in the stream, so a caller editing its workload must not
-        // repoint the faults and delays of every other one.
-        let e = env(r#"{"f": 1, "crashes": {}, "pauses": {"count": [0, 2]}}"#);
-        let bare = Scenario::draw(7, &e, None);
-        let w = work(r#"{"stimuli":[{"count":[3,9],"at_frac":[0.0,0.5],"body":{"type":"x"}}]}"#);
-        let loaded = Scenario::draw(7, &e, Some(&w));
-        assert_eq!(bare.gst, loaded.gst);
-        assert_eq!(bare.delay_pre, loaded.delay_pre);
-        assert_eq!(format!("{:?}", bare.faults), format!("{:?}", loaded.faults));
-        assert!(bare.stimuli.is_empty() && !loaded.stimuli.is_empty());
+    fn no_events_means_no_stimuli_and_no_faults() {
+        let sc = Scenario::draw(1, &space(r#"{"f": 1}"#));
+        assert!(sc.stimuli.is_empty() && sc.faults.is_empty());
     }
 
-    #[test]
-    fn count_is_inclusive_and_the_index_substitutes() {
-        let w = work(r#"{"stimuli":[{"count":[5,5],"at_frac":0.01,"body":{"id":"m<i>"}}]}"#);
-        let sc = Scenario::draw(9, &env(r#"{"f": 1}"#), Some(&w));
-        assert_eq!(sc.stimuli.len(), 5, "count [5,5] draws exactly five");
-        let ids: Vec<&str> = sc.stimuli.iter().map(|s| s.body["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, vec!["m0", "m1", "m2", "m3", "m4"]);
-        assert!(sc.stimuli.iter().all(|s| s.at == 100), "a pinned fraction pins the instant");
-    }
+    // ----------------------------------------------------------- what is refused
 
     #[test]
-    fn per_node_emits_one_each_in_order() {
-        let w = work(
-            r#"{"stimuli":[{"per_node":true,"at_frac":0.0,"body":{"v":{"$rand":[0,1]},"w":{"$rand":[7,7]}}}]}"#,
-        );
-        let sc = Scenario::draw(1, &env(r#"{"f": 1}"#), Some(&w));
-        let nodes: Vec<&str> = sc.stimuli.iter().map(|s| s.node.as_str()).collect();
-        assert_eq!(nodes, vec!["n0", "n1", "n2", "n3"]);
-        // Inclusive: [0, 1] reaches both ends, and [7, 7] is the single value seven.
-        assert!(sc.stimuli.iter().all(|s| s.body["v"].as_u64().unwrap() <= 1));
-        assert!(sc.stimuli.iter().all(|s| s.body["w"].as_u64() == Some(7)));
-    }
-
-    #[test]
-    fn a_following_group_lands_on_the_same_node_shortly_after() {
-        let w = work(
-            r#"{"stimuli":[
-                 {"id":"a","count":[6,6],"at_frac":[0.0,0.4],"body":{"type":"x"}},
-                 {"after":"a","delay":[5,9],"body":{"type":"y"}}]}"#,
-        );
-        let sc = Scenario::draw(4, &env(r#"{"f": 1}"#), Some(&w));
-        assert_eq!(sc.stimuli.len(), 12, "one follower per event of the group it follows");
-        for f in sc.stimuli.iter().filter(|s| s.body["type"] == "y") {
-            let ok = sc.stimuli.iter().any(|b| {
-                b.body["type"] == "x" && b.node == f.node && (5..=9).contains(&(f.at - b.at))
-            });
-            assert!(ok, "no x on {} within 5..=9 before {}", f.node, f.at);
-        }
-    }
-
-    #[test]
-    fn reordering_two_keys_in_a_body_changes_nothing() {
-        // Measured to change every seed before keys were walked in sorted order.
-        let one = work(r#"{"stimuli":[{"count":3,"at_frac":0.1,"body":{"a":{"$rand":[0,999]},"b":{"$rand":[0,999]}}}]}"#);
-        let other = work(r#"{"stimuli":[{"count":3,"at_frac":0.1,"body":{"b":{"$rand":[0,999]},"a":{"$rand":[0,999]}}}]}"#);
-        let e = env(r#"{"f": 1}"#);
-        let l = Scenario::draw(1, &e, Some(&one));
-        let r = Scenario::draw(1, &e, Some(&other));
-        let vals = |s: &Scenario| -> Vec<(u64, u64)> {
-            s.stimuli
-                .iter()
-                .map(|x| (x.body["a"].as_u64().unwrap(), x.body["b"].as_u64().unwrap()))
-                .collect()
-        };
-        assert_eq!(vals(&l), vals(&r));
-    }
-
-    #[test]
-    fn stimuli_come_out_sorted_by_time() {
-        let w = work(r#"{"stimuli":[{"count":[30,30],"at_frac":[0.0,1.0],"body":{"type":"x"}}]}"#);
-        let sc = Scenario::draw(11, &env(r#"{"f": 1}"#), Some(&w));
-        assert!(sc.stimuli.windows(2).all(|w| w[0].at <= w[1].at));
-    }
-
-    #[test]
-    fn a_workload_that_cannot_mean_what_it_says_is_rejected() {
+    fn a_space_that_cannot_mean_what_it_says_is_refused() {
         let cases = [
-            (r#"{"stimuli":[{"after":"nope","body":{}}]}"#, "not an earlier group"),
-            (
-                r#"{"stimuli":[{"id":"a","count":2,"body":{}},{"after":"a","count":3,"body":{}}]}"#,
-                "have no meaning",
-            ),
-            (r#"{"stimuli":[{"delay":[1,2],"body":{}}]}"#, "follows none"),
-            (
-                r#"{"stimuli":[{"id":"a","body":{}},{"id":"a","body":{}}]}"#,
-                "already taken",
-            ),
-            // Only backwards: a forward reference is how a cycle would start.
-            (
-                r#"{"stimuli":[{"after":"b","body":{}},{"id":"b","body":{}}]}"#,
-                "not an earlier group",
-            ),
+            (r#"{"events": [{"nodes": "all", "count": 1, "at_frac": 0.1, "crash": {}}]}"#,
+             "pick one"),
+            (r#"{"events": [{"nodes": "all", "delay": 1, "crash": {}}]}"#,
+             "this is a root"),
+            (r#"{"events": [{"nodes": "all", "crash": {}}]}"#, "a root needs `at_frac`"),
+            (r#"{"events": [{"nodes": "all", "at_frac": 0.1, "crash": {},
+                 "then": [{"at_frac": 0.2, "crash": {}}]}]}"#, "places a root"),
+            (r#"{"events": [{"count": 1, "at_frac": 0.1, "partition": {"duration": 1},
+                 "then": [{"delay": 1, "crash": {}}]}]}"#, "nothing to inherit"),
+            (r#"{"link_delay_pre": [400, 1]}"#, "runs backwards"),
+            (r#"{"events": [{"nodes": {"distinct": "g"}, "at_frac": 0.1, "crash": {}}]}"#,
+             "an integer or"),
         ];
         for (src, needle) in cases {
-            let err = WorkloadSpace::from_json(src).expect_err(&format!("{src} must be rejected"));
+            let err = Space::from_json(src).expect_err(&format!("{src} must be refused"));
             assert!(err.contains(needle), "{err:?} does not mention {needle:?}");
         }
     }
 
     #[test]
     fn an_unknown_field_is_a_mistake_not_a_silence() {
-        assert!(EnvironmentSpace::from_json(r#"{"crash": {}}"#).is_err());
-        assert!(WorkloadSpace::from_json(r#"{"events":[]}"#).is_err());
+        assert!(Space::from_json(r#"{"crashes": {}}"#).is_err());
+        assert!(Space::from_json(r#"{"events": [{"nodez": "all"}]}"#).is_err());
     }
+
+    // ------------------------------------------------------------- provenance
 
     #[test]
     fn the_fingerprint_follows_meaning_not_formatting() {
         let a = r#"{"f": 1, "fifo": true}"#;
         let reformatted = "{\n  \"fifo\"  : true,\n  \"f\": 1\n}";
         let changed = r#"{"f": 2, "fifo": true}"#;
-        assert_eq!(fingerprint(a, None), fingerprint(reformatted, None));
-        assert_ne!(fingerprint(a, None), fingerprint(changed, None));
-        // A workload is part of what a seed means, so adding one must move the fingerprint.
-        assert_ne!(fingerprint(a, None), fingerprint(a, Some(r#"{"stimuli":[]}"#)));
-    }
-
-
-    // ------------------------------------------------------------- a sweep
-
-    /// Environment spaces chosen to reach every branch of the draw, including the degenerate ones.
-    const ENVIRONMENTS: &[&str] = &[
-        r#"{}"#,
-        r#"{"f": 0, "partitions": {"count": 2}}"#,
-        r#"{"f": [0, 3], "crashes": {}, "pauses": {"count": [0, 3]}, "partitions": {"count": [0, 2]}}"#,
-        r#"{"f": 3, "crashes": {"at_frac": [0.0, 1.0]}}"#,
-        r#"{"f": [1, 2], "time_limit": [200, 4000], "gst_frac": [0.0, 1.0]}"#,
-        r#"{"f": 1, "fifo": [false, true], "jitter_pct": [0, 300]}"#,
-        r#"{"f": 2, "link_delay_pre": 7, "link_delay_post": [0, 0]}"#,
-        r#"{"f": 1, "time_limit": 2, "crashes": {}, "pauses": {"count": 2}, "partitions": {"count": 2}}"#,
-        r#"{"f": [1, 3], "partitions": {"count": 3, "at_frac": [0.0, 1.0], "duration": [1, 9000]}}"#,
-    ];
-
-    const WORKLOADS: &[&str] = &[
-        r#"{"stimuli": []}"#,
-        r#"{"stimuli":[{"count":[0,6],"at_frac":[0.0,1.0],"body":{"type":"x","v":{"$rand":[0,9]}}}]}"#,
-        r#"{"stimuli":[{"per_node":true,"at_frac":[0.0,0.9],"body":{"type":"p","id":"m<i>"}}]}"#,
-        r#"{"stimuli":[{"id":"a","count":[1,4],"at_frac":[0.9,1.0],"body":{"type":"a"}},
-                       {"after":"a","delay":[1,5000],"body":{"type":"b"}}]}"#,
-        r#"{"stimuli":[{"id":"a","count":[1,3],"at_frac":[0.0,0.2],"body":{"type":"a"}},
-                       {"id":"b","after":"a","delay":[1,10],"body":{"type":"b"}},
-                       {"after":"b","delay":[1,10],"body":{"type":"c"}}]}"#,
-        r#"{"stimuli":[{"id":"a","count":0,"at_frac":0.1,"body":{"type":"a"}},
-                       {"after":"a","delay":[1,10],"body":{"type":"b"}}]}"#,
-    ];
-
-    /// Every invariant the rest of the tool assumes, over every branch, on many seeds.
-    ///
-    /// The targeted tests above each pin one behaviour. This is what says no combination of space
-    /// and seed produces something the simulator or a checker would have to cope with: an instant
-    /// outside the run, a partition with nobody on one side, a node name that does not exist.
-    #[test]
-    fn the_draw_holds_its_invariants_everywhere() {
-        for (ei, esrc) in ENVIRONMENTS.iter().enumerate() {
-            let e = env(esrc);
-            for (wi, wsrc) in WORKLOADS.iter().enumerate() {
-                let w = work(wsrc);
-                for seed in 1..40u64 {
-                    let where_ = format!("env {ei}, workload {wi}, seed {seed}");
-                    let sc = Scenario::draw(seed, &e, Some(&w));
-                    let last = sc.time_limit - 1;
-                    let names: Vec<String> = (0..sc.nodes).map(|i| format!("n{i}")).collect();
-
-                    assert_eq!(sc.nodes, 3 * sc.f + 1, "{where_}: n = 3f+1");
-                    assert!(sc.time_limit >= 2 && sc.gst <= sc.time_limit, "{where_}");
-
-                    assert_eq!(sc.delay_pre.len(), sc.nodes, "{where_}");
-                    for i in 0..sc.nodes {
-                        for j in 0..sc.nodes {
-                            let (a, b) = (sc.delay_pre[i][j], sc.delay_post[i][j]);
-                            if i == j {
-                                assert_eq!((a, b), (0, 0), "{where_}: a node delays to itself");
-                            } else {
-                                assert!(a >= 1 && b >= 1, "{where_}: zero delay on {i}->{j}");
-                            }
-                        }
-                    }
-
-                    let mut crashed: Vec<&str> = vec![];
-                    for f in &sc.faults {
-                        assert!((1..=last).contains(&f.at()), "{where_}: fault at {}", f.at());
-                        match f {
-                            Fault::Crash { node, .. } => {
-                                assert!(names.contains(node), "{where_}: crash on {node}");
-                                assert!(!crashed.contains(&node.as_str()), "{where_}: twice");
-                                crashed.push(node);
-                            }
-                            Fault::Pause { node, duration, .. } => {
-                                assert!(names.contains(node), "{where_}: pause on {node}");
-                                assert!(*duration >= 1, "{where_}: pause of nothing");
-                            }
-                            Fault::Partition { at, duration, side } => {
-                                assert!(!side.is_empty(), "{where_}: partition with an empty side");
-                                assert!(side.len() < sc.nodes, "{where_}: partition of everyone");
-                                assert!(side.iter().all(|s| names.contains(s)), "{where_}");
-                                let mut seen = side.clone();
-                                seen.sort();
-                                seen.dedup();
-                                assert_eq!(seen.len(), side.len(), "{where_}: a node listed twice");
-                                assert!(*duration >= 1, "{where_}");
-                                // Heals before the end, unless it started at or after the
-                                // deadline, where a split cannot last less than one tick.
-                                let heal = sc.time_limit * 8 / 10;
-                                assert!(
-                                    *at >= heal || at + duration <= heal,
-                                    "{where_}: split {at}+{duration} outlives {heal}"
-                                );
-                            }
-                        }
-                    }
-                    let n_crashes =
-                        sc.faults.iter().filter(|f| matches!(f, Fault::Crash { .. })).count();
-                    assert!(n_crashes <= sc.f, "{where_}: {n_crashes} crashes for f={}", sc.f);
-                    assert!(sc.faults.windows(2).all(|p| p[0].at() <= p[1].at()), "{where_}");
-                    for f in &sc.faults {
-                        if let Fault::Pause { node, .. } = f {
-                            assert!(!crashed.contains(&node.as_str()), "{where_}: pausing the dead");
-                        }
-                    }
-
-                    for st in &sc.stimuli {
-                        assert!(st.at <= last, "{where_}: stimulus at {} past {last}", st.at);
-                        assert!(names.contains(&st.node), "{where_}: stimulus for {}", st.node);
-                    }
-                    assert!(sc.stimuli.windows(2).all(|p| p[0].at <= p[1].at), "{where_}: unsorted");
-
-                    // The whole point of the tool: the same inputs give the same run.
-                    let again = Scenario::draw(seed, &e, Some(&w));
-                    assert_eq!(sc.to_json(), again.to_json(), "{where_}: draw is not a function");
-                }
-            }
-        }
-    }
-
-    // -------------------------------------------------- paths the sweep cannot assert
-
-    #[test]
-    fn a_drawn_fraction_covers_its_range() {
-        // Pinned would satisfy every invariant above while making gst_frac a dead field.
-        let e = env(r#"{"f": 1, "time_limit": 10000, "gst_frac": [0.10, 0.33]}"#);
-        let gsts: Vec<u64> = (1..200).map(|s| Scenario::draw(s, &e, None).gst).collect();
-        assert!(gsts.iter().all(|g| (1000..=3300).contains(g)), "outside [0.10, 0.33]");
-        let (lo, hi) = (gsts.iter().min().unwrap(), gsts.iter().max().unwrap());
-        assert!(*lo < 1200 && *hi > 3100, "only reached {lo}..{hi} of 1000..3300");
-    }
-
-    #[test]
-    fn a_drawn_flag_reaches_both_values() {
-        let e = env(r#"{"f": 1, "fifo": [false, true]}"#);
-        let seen: Vec<bool> = (1..40).map(|s| Scenario::draw(s, &e, None).fifo).collect();
-        assert!(seen.contains(&true) && seen.contains(&false));
-        // And pinning it still means pinning it.
-        let pinned = env(r#"{"f": 1, "fifo": true}"#);
-        assert!((1..40).all(|s| Scenario::draw(s, &pinned, None).fifo));
-    }
-
-    #[test]
-    fn the_time_limit_can_be_drawn_and_everything_follows_it() {
-        let e = env(r#"{"f": 1, "time_limit": [500, 600], "gst_frac": 0.5, "crashes": {}}"#);
-        for seed in 1..40 {
-            let sc = Scenario::draw(seed, &e, None);
-            assert!((500..=600).contains(&sc.time_limit));
-            assert_eq!(sc.gst, sc.time_limit / 2);
-            assert!(sc.faults.iter().all(|f| f.at() < sc.time_limit));
-        }
-    }
-
-    #[test]
-    fn a_backwards_range_is_refused_for_every_kind_of_value() {
-        let cases = [
-            r#"{"link_delay_pre": [400, 1]}"#,
-            r#"{"gst_frac": [0.9, 0.1]}"#,
-            r#"{"fifo": [true, false]}"#,
-        ];
-        for src in cases {
-            let err = EnvironmentSpace::from_json(src).expect_err(&format!("{src} must be refused"));
-            assert!(err.contains("runs backwards"), "{err}");
-        }
-        // The right way round is fine, including a range of width zero.
-        assert!(EnvironmentSpace::from_json(r#"{"link_delay_pre": [7, 7]}"#).is_ok());
-    }
-
-    #[test]
-    fn a_group_of_one_node_cannot_be_partitioned() {
-        // f = 0 leaves a single node. Asking for a proper non-empty subset of it has no answer,
-        // and used to panic inside the generator rather than say so.
-        let sc = Scenario::draw(1, &env(r#"{"f": 0, "partitions": {"count": 3}}"#), None);
-        assert_eq!(sc.nodes, 1);
-        assert!(sc.faults.is_empty());
-    }
-
-    #[test]
-    fn a_follower_that_would_land_past_the_end_is_brought_back_inside() {
-        // Otherwise the count of stimuli would depend on the delay drawn, and a workload would
-        // quietly shrink near the time limit.
-        let w = work(
-            r#"{"stimuli":[{"id":"a","count":[4,4],"at_frac":[0.99,1.0],"body":{"type":"a"}},
-                           {"after":"a","delay":[5000,9000],"body":{"type":"b"}}]}"#,
-        );
-        let sc = Scenario::draw(2, &env(r#"{"f": 1, "time_limit": 1000}"#), Some(&w));
-        assert_eq!(sc.stimuli.len(), 8, "a follower must never be dropped");
-        assert!(sc.stimuli.iter().all(|s| s.at <= 999));
-    }
-
-    #[test]
-    fn a_chain_of_followers_resolves_in_order() {
-        let w = work(
-            r#"{"stimuli":[{"id":"a","count":[3,3],"at_frac":[0.0,0.1],"body":{"type":"a"}},
-                           {"id":"b","after":"a","delay":[10,10],"body":{"type":"b"}},
-                           {"after":"b","delay":[20,20],"body":{"type":"c"}}]}"#,
-        );
-        let sc = Scenario::draw(5, &env(r#"{"f": 1}"#), Some(&w));
-        assert_eq!(sc.stimuli.len(), 9);
-        for c in sc.stimuli.iter().filter(|s| s.body["type"] == "c") {
-            let b = sc
-                .stimuli
-                .iter()
-                .find(|s| s.body["type"] == "b" && s.node == c.node && s.at + 20 == c.at)
-                .expect("no b twenty before its c, on the same node");
-            assert!(sc
-                .stimuli
-                .iter()
-                .any(|a| a.body["type"] == "a" && a.node == b.node && a.at + 10 == b.at));
-        }
-    }
-
-    #[test]
-    fn following_a_group_that_produced_nothing_produces_nothing() {
-        let w = work(
-            r#"{"stimuli":[{"id":"a","count":0,"at_frac":0.1,"body":{"type":"a"}},
-                           {"after":"a","delay":[1,10],"body":{"type":"b"}}]}"#,
-        );
-        assert!(Scenario::draw(1, &env(r#"{"f": 1}"#), Some(&w)).stimuli.is_empty());
-    }
-
-    #[test]
-    fn provenance_survives_a_round_trip() {
-        let e = env(r#"{"f": 1}"#);
-        let sc = Scenario::draw(3, &e, None).from(Drawn {
-            seed: 3,
-            environment: "environments/clean.json".into(),
-            workload: None,
-            fingerprint: fingerprint(r#"{"f": 1}"#, None),
-        });
-        let back = Scenario::from_json(&sc.to_json()).expect("round trip");
-        assert_eq!(back.seed(), 3);
-        let d = back.drawn.expect("provenance kept");
-        assert_eq!((d.seed, d.environment.as_str()), (3, "environments/clean.json"));
-        assert_eq!(d.fingerprint, fingerprint(r#"{"f": 1}"#, None));
+        assert_eq!(fingerprint(a), fingerprint(reformatted));
+        assert_ne!(fingerprint(a), fingerprint(changed));
     }
 
     #[test]
@@ -1143,8 +949,110 @@ mod tests {
         )
         .unwrap();
         assert_eq!((sc.nodes, sc.time_limit, sc.stimuli.len()), (4, 10_000, 1));
-        assert!(sc.delay_pre.is_empty(), "matrices may be omitted");
-        assert!(sc.drawn.is_none(), "written by hand, so drawn from nobody");
+        assert!(sc.delay_pre.is_empty() && sc.drawn.is_none());
         assert_eq!(sc.seed(), 0);
+    }
+
+    #[test]
+    fn provenance_survives_a_round_trip() {
+        let src = r#"{"f": 1}"#;
+        let sc = Scenario::draw(3, &space(src)).from(Drawn {
+            seed: 3,
+            space: "spaces/clean.json".into(),
+            fingerprint: fingerprint(src),
+        });
+        let back = Scenario::from_json(&sc.to_json()).expect("round trip");
+        assert_eq!(back.seed(), 3);
+        let d = back.drawn.expect("provenance kept");
+        assert_eq!((d.space.as_str(), d.fingerprint), ("spaces/clean.json", fingerprint(src)));
+    }
+
+    // ------------------------------------------------------------- the sweep
+
+    const SPACES: &[&str] = &[
+        r#"{}"#,
+        r#"{"f": 0, "events": [{"count": 2, "at_frac": 0.1, "partition": {"duration": 10}}]}"#,
+        r#"{"f": [0, 3], "events": [
+            {"nodes": {"distinct": [0, "f"]}, "at_frac": [0.0, 0.7], "crash": {}},
+            {"nodes": {"distinct": [0, 3]}, "at_frac": [0.0, 0.6], "pause": {"duration": [10, 400]}},
+            {"count": [0, 2], "at_frac": [0.0, 0.6], "partition": {"duration": [50, 600]}}]}"#,
+        r#"{"f": [1, 2], "time_limit": [2000, 9000], "gst_frac": [0.0, 1.0], "events": [
+            {"nodes": "all", "at_frac": [0.0, 0.5], "stimulus": {"type": "x", "v": {"$rand": [0, 9]}},
+             "then": [{"delay": [0, 40], "stimulus": {"type": "y"}},
+                      {"nodes": {"distinct": 1}, "delay": [1, 20], "crash": {}}]}]}"#,
+        r#"{"f": 1, "jitter_pct": [0, 300], "fifo": [false, true], "events": [
+            {"nodes": {"any": [0, 6]}, "at_frac": [0.0, 0.9], "stimulus": {"type": "z", "id": "m<i>"}}]}"#,
+    ];
+
+    /// Every invariant the simulator and any checker are entitled to assume, over every branch.
+    #[test]
+    fn the_draw_holds_its_invariants_everywhere() {
+        for (si, src) in SPACES.iter().enumerate() {
+            let sp = space(src);
+            for seed in 1..40u64 {
+                let w = format!("space {si}, seed {seed}");
+                let sc = Scenario::draw(seed, &sp);
+                let names: Vec<String> = (0..sc.nodes).map(|i| format!("n{i}")).collect();
+
+                assert_eq!(sc.nodes, 3 * sc.f + 1, "{w}");
+                assert!(sc.time_limit >= 2 && sc.gst <= sc.time_limit, "{w}");
+                assert_eq!(sc.delay_pre.len(), sc.nodes, "{w}");
+                for i in 0..sc.nodes {
+                    for j in 0..sc.nodes {
+                        let (a, b) = (sc.delay_pre[i][j], sc.delay_post[i][j]);
+                        if i == j {
+                            assert_eq!((a, b), (0, 0), "{w}");
+                        } else {
+                            assert!(a >= 1 && b >= 1, "{w}: zero delay {i}->{j}");
+                        }
+                    }
+                }
+
+                let mut crashed: Vec<&str> = vec![];
+                for f in &sc.faults {
+                    match f {
+                        Fault::Crash { node, .. } => {
+                            assert!(names.contains(node), "{w}: crash on {node}");
+                            assert!(!crashed.contains(&node.as_str()), "{w}: crashed twice");
+                            crashed.push(node);
+                        }
+                        Fault::Pause { node, duration, .. } => {
+                            assert!(names.contains(node) && *duration >= 1, "{w}");
+                        }
+                        Fault::Partition { duration, side, .. } => {
+                            assert!(!side.is_empty() && side.len() < sc.nodes, "{w}: {side:?}");
+                            assert!(side.iter().all(|s| names.contains(s)) && *duration >= 1, "{w}");
+                            let mut seen = side.clone();
+                            seen.sort();
+                            seen.dedup();
+                            assert_eq!(seen.len(), side.len(), "{w}: a process listed twice");
+                        }
+                    }
+                }
+                // Le budget `f` n'est plus garanti par la structure : deux branches peuvent faire
+                // tomber deux processus différents. C'est à l'auteur de l'espace de le respecter.
+                // Ce que le tirage garantit, c'est qu'aucun processus ne meurt deux fois.
+                assert!(sc.faults.windows(2).all(|p| p[0].at() <= p[1].at()), "{w}: unsorted");
+                assert!(sc.stimuli.windows(2).all(|p| p[0].at <= p[1].at), "{w}: unsorted");
+                assert!(sc.stimuli.iter().all(|s| names.contains(&s.node)), "{w}");
+
+                assert_eq!(sc.to_json(), Scenario::draw(seed, &sp).to_json(), "{w}: not a function");
+            }
+        }
+    }
+
+    #[test]
+    fn keys_reordered_in_a_body_change_nothing() {
+        let one = space(r#"{"f": 1, "events": [{"nodes": "all", "at_frac": 0.1,
+            "stimulus": {"a": {"$rand": [0, 999]}, "b": {"$rand": [0, 999]}}}]}"#);
+        let other = space(r#"{"f": 1, "events": [{"nodes": "all", "at_frac": 0.1,
+            "stimulus": {"b": {"$rand": [0, 999]}, "a": {"$rand": [0, 999]}}}]}"#);
+        let vals = |sc: &Scenario| -> Vec<(u64, u64)> {
+            sc.stimuli
+                .iter()
+                .map(|s| (s.body["a"].as_u64().unwrap(), s.body["b"].as_u64().unwrap()))
+                .collect()
+        };
+        assert_eq!(vals(&Scenario::draw(1, &one)), vals(&Scenario::draw(1, &other)));
     }
 }

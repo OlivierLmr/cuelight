@@ -50,8 +50,8 @@ fn a_run_replays_byte_identical() {
         return;
     }
     let (a, b) = (tmp("replay-a"), tmp("replay-b"));
-    assert!(run(&a, &["--seed", "5", "--environment", "testdata/env-fifo.json"], "chatter.py").0);
-    assert!(run(&b, &["--seed", "5", "--environment", "testdata/env-fifo.json"], "chatter.py").0);
+    assert!(run(&a, &["--seed", "5", "--space", "testdata/env-fifo.json"], "chatter.py").0);
+    assert!(run(&b, &["--seed", "5", "--space", "testdata/env-fifo.json"], "chatter.py").0);
     assert_eq!(journal(&a), journal(&b), "same scenario, different journal");
 }
 
@@ -93,7 +93,7 @@ fn fifo_orders_a_link_and_its_absence_does_not() {
     };
 
     let ordered = tmp("fifo-on");
-    assert!(run(&ordered, &["--seed", "1", "--environment", "testdata/env-fifo-clean.json"], "ordering.py").0);
+    assert!(run(&ordered, &["--seed", "1", "--space", "testdata/env-fifo-clean.json"], "ordering.py").0);
     let got = deliveries(&ordered);
     assert!(!got.is_empty(), "the fixture delivered nothing");
     assert!(got.windows(2).all(|w| w[0] < w[1]), "fifo: true left the link unordered: {got:?}");
@@ -181,7 +181,7 @@ fn the_journal_keeps_its_contract() {
         return;
     }
     let out = tmp("contract");
-    assert!(run(&out, &["--seed", "8", "--environment", "testdata/env-fifo.json"], "chatter.py").0);
+    assert!(run(&out, &["--seed", "8", "--space", "testdata/env-fifo.json"], "chatter.py").0);
     let lines: Vec<serde_json::Value> = journal(&out)
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())

@@ -3,7 +3,7 @@
 //! Every behaviour lives in the library, so that a checker calling `cuelight` as a dependency and a
 //! person typing `cuelight run` exercise the same code.
 
-use cuelight::scenario::{fingerprint, Drawn, EnvironmentSpace, Scenario, WorkloadSpace};
+use cuelight::scenario::{fingerprint, Drawn, Scenario, Space};
 use cuelight::{sim, viz};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,8 +25,7 @@ OPTIONS:
     --bin <cmd...>     command launching one node (MUST BE LAST: swallows the rest of the line)
     --scenario <path>  replay a stored scenario instead of drawing one
     --seed <s>         seed to draw from              [default: 1]
-    --environment <p>  what the run undergoes         [default: every field pinned, no faults]
-    --workload <p>     what it is asked to do         [default: none]
+    --space <path>     the world and the events it draws  [default: every field pinned, no events]
     --watchdog <ms>    wall-clock hang detector       [default: 5000]
     --out <dir>        run directory                 [default: store/latest]
     --journal <path>   viz: journal to render
@@ -37,14 +36,11 @@ struct Args {
     scenario_path: Option<PathBuf>,
     journal: Option<PathBuf>,
     seed: u64,
-    env: EnvironmentSpace,
-    /// Kept beside the parsed spaces so a drawn scenario can record where it came from, and what
-    /// the files said at the time.
-    env_name: String,
-    env_src: String,
-    work: Option<WorkloadSpace>,
-    work_name: Option<String>,
-    work_src: Option<String>,
+    space: Space,
+    /// Kept beside the parsed space so a drawn scenario can record where it came from, and what
+    /// the file said at the time.
+    space_name: String,
+    space_src: String,
     watchdog: u64,
     out: PathBuf,
 }
@@ -56,12 +52,9 @@ impl Default for Args {
             scenario_path: None,
             journal: None,
             seed: 1,
-            env: EnvironmentSpace::from_json("{}").expect("empty object is every default"),
-            env_name: "(defaults)".into(),
-            env_src: "{}".into(),
-            work: None,
-            work_name: None,
-            work_src: None,
+            space: Space::from_json("{}").expect("empty object is every default"),
+            space_name: "(defaults)".into(),
+            space_src: "{}".into(),
             watchdog: 5_000,
             out: PathBuf::from("store/latest"),
         }
@@ -88,20 +81,12 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--seed" => { a.seed = val(i)?.parse().map_err(|_| "bad --seed")?; i += 2 }
             "--watchdog" => { a.watchdog = val(i)?.parse().map_err(|_| "bad --watchdog")?; i += 2 }
             "--out" => { a.out = PathBuf::from(val(i)?); i += 2 }
-            "--environment" => {
+            "--space" => {
                 let p = val(i)?;
                 let raw = std::fs::read_to_string(&p).map_err(|e| format!("{p}: {e}"))?;
-                a.env = EnvironmentSpace::from_json(&raw)?;
-                a.env_name = p;
-                a.env_src = raw;
-                i += 2
-            }
-            "--workload" => {
-                let p = val(i)?;
-                let raw = std::fs::read_to_string(&p).map_err(|e| format!("{p}: {e}"))?;
-                a.work = Some(WorkloadSpace::from_json(&raw)?);
-                a.work_name = Some(p);
-                a.work_src = Some(raw);
+                a.space = Space::from_json(&raw)?;
+                a.space_name = p;
+                a.space_src = raw;
                 i += 2
             }
             other => return Err(format!("unknown option {other}")),
@@ -115,11 +100,10 @@ fn scenario_for(a: &Args, seed: u64) -> Result<Scenario, String> {
         Some(p) => Scenario::from_json(
             &std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?,
         ),
-        None => Ok(Scenario::draw(seed, &a.env, a.work.as_ref()).from(Drawn {
+        None => Ok(Scenario::draw(seed, &a.space).from(Drawn {
             seed,
-            environment: a.env_name.clone(),
-            workload: a.work_name.clone(),
-            fingerprint: fingerprint(&a.env_src, a.work_src.as_deref()),
+            space: a.space_name.clone(),
+            fingerprint: fingerprint(&a.space_src),
         })),
     }
 }

@@ -63,8 +63,8 @@ fn demo_run(out: &str, node: &str, extra: &[&str]) -> (bool, String) {
 fn list_names_each_pairing_by_its_coordinates() {
     let o = Command::new(demo()).arg("--list").current_dir(root()).output().expect("no run");
     let text = String::from_utf8_lossy(&o.stdout);
-    // A workload and an environment give both halves; an environment alone names itself.
-    assert!(text.contains("pokes-quiet"), "{text}");
+    // A space is named by its file.
+    assert!(text.contains("quiet"), "{text}");
     assert!(text.contains("\n  crashes "), "{text}");
     assert!(text.contains("nobody-home"), "{text}");
 }
@@ -76,7 +76,7 @@ fn a_node_that_answers_passes_every_pairing() {
     }
     let (ok, text) = demo_run("green", "poked.py", &[]);
     assert!(ok, "{text}");
-    assert!(text.contains("pokes-quiet: 4/4 seeds passed"), "{text}");
+    assert!(text.contains("quiet: 4/4 seeds passed"), "{text}");
     // A parametric scenario with no workload is a parametric scenario all the same.
     assert!(text.contains("crashes: 4/4 seeds passed"), "{text}");
     assert!(text.contains("all good"), "{text}");
@@ -100,10 +100,10 @@ fn a_failure_is_reported_with_the_command_that_reproduces_it() {
     }
     let (ok, text) = demo_run("red", "silent.py", &[]);
     assert!(!ok, "a silent node passed: {text}");
-    assert!(text.contains("pokes-quiet: 0/4 seeds passed"), "{text}");
+    assert!(text.contains("quiet: 0/4 seeds passed"), "{text}");
     assert!(text.contains("every-poke-answered"), "{text}");
     // The address of a failure is the triple, and the replay line has to carry all of it.
-    assert!(text.contains("--seed 1 --only pokes-quiet"), "{text}");
+    assert!(text.contains("--seed 1 --only quiet"), "{text}");
     assert!(text.contains("journal:"), "{text}");
 }
 
@@ -120,7 +120,7 @@ fn a_node_that_does_not_replay_stops_the_suite_before_any_verdict() {
     // And the case it replays must be one that exercises something. A written scenario is usually
     // written because it is degenerate; this suite's kills both nodes at t=1, and replaying it
     // compares two empty journals.
-    assert!(text.contains("pokes-quiet seed 1"), "it replayed the wrong case: {text}");
+    assert!(text.contains("quiet seed 1"), "it replayed the wrong case: {text}");
 }
 
 /// The first thing anyone sees, and it used to name the wrong thing: an unfilled skeleton dies on
@@ -150,7 +150,7 @@ fn a_run_cut_at_the_limit_is_not_judged() {
     assert!(!ok, "{text}");
     assert!(text.contains("cut at the time limit"), "{text}");
     // Not one drawn seed may be judged: each is reported as cut, never as a property that failed.
-    assert!(text.contains("pokes-quiet: 0/4 seeds passed"), "{text}");
+    assert!(text.contains("quiet: 0/4 seeds passed"), "{text}");
     let judged = text
         .lines()
         .filter(|l| l.trim_start().starts_with("seed "))
@@ -167,7 +167,7 @@ fn only_runs_what_it_names_and_refuses_what_it_does_not() {
     let (ok, text) = demo_run("only", "poked.py", &["--only", "crashes"]);
     assert!(ok, "{text}");
     assert!(text.contains("crashes: 4/4"), "{text}");
-    assert!(!text.contains("pokes-quiet:"), "--only ran a parametric scenario it did not name: {text}");
+    assert!(!text.contains("quiet:"), "--only ran a parametric scenario it did not name: {text}");
     assert!(!text.contains("nobody-home.json:"), "--only ran a written scenario too: {text}");
 
     // Matching nothing is a mistake, not an empty run: doing nothing quietly looks like success.

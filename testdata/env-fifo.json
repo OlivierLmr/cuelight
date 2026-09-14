@@ -1,1 +1,5 @@
-{ "fifo": true, "crashes": {}, "pauses": { "count": [0, 2] }, "partitions": { "count": [0, 1] } }
+{ "fifo": true,
+  "events": [
+    { "nodes": { "distinct": [0, "f"] }, "at_frac": [0.0, 0.7], "crash": {} },
+    { "nodes": { "distinct": [0, 2] },   "at_frac": [0.0, 0.6], "pause": { "duration": [10, 400] } },
+    { "count": [0, 1],                   "at_frac": [0.0, 0.6], "partition": { "duration": [50, 600] } } ] }

@@ -13,11 +13,8 @@
 //! use cuelight_suite::{Events, Kind, Parametric, Report, Scenario, Suite};
 //! use std::process::ExitCode;
 //!
-//! static PAIRINGS: &[Parametric] = &[Parametric {
-//!     environment: "environments/steady.json",
-//!     workload: Some("workloads/steady.json"),
-//!     seeds: 200,
-//! }];
+//! static SPACES: &[Parametric] =
+//!     &[Parametric { space: "spaces/steady.json", seeds: 200 }];
 //!
 //! fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
 //!     r.add("said-something", Kind::Safety, !ev.observes.is_empty(), "…".into());
@@ -25,13 +22,13 @@
 //!
 //! fn main() -> ExitCode {
 //!     cuelight_suite::run(
-//!         Suite { name: "mine", parametric: PAIRINGS, written: &[], check },
+//!         Suite { name: "mine", parametric: SPACES, written: &[], check },
 //!         env!("CARGO_MANIFEST_DIR"),
 //!     )
 //! }
 //! ```
 
-use cuelight::scenario::{fingerprint, Drawn, EnvironmentSpace, Fault, WorkloadSpace};
+use cuelight::scenario::{fingerprint, Drawn, Fault, Space};
 use cuelight::sim;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -175,12 +172,9 @@ pub fn load_events(dir: &Path) -> Result<Events, String> {
 /// environment that injects them, deadlocks — correctly. Listing makes "this is never run with
 /// crashes" one visible line instead of a property nobody rereads.
 pub struct Parametric {
-    /// Environment space, relative to the suite directory. Shared between suites that assume the
-    /// same model.
-    pub environment: &'static str,
-    /// Workload space, relative to the suite directory. `None` means the faults are the whole
-    /// workload, which is what a failure detector driven by crashes and time needs.
-    pub workload: Option<&'static str>,
+    /// The space, relative to the suite directory: the world a run happens in and the tree of
+    /// events that befall it.
+    pub space: &'static str,
     pub seeds: u64,
 }
 
@@ -298,17 +292,13 @@ fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, 
 /// A parametric scenario is named by its coordinates. Two file names already say which workload ran in which
 /// environment, and a label of its own would be a third name to keep true.
 fn label(p: &Parametric) -> String {
-    match p.workload {
-        Some(w) => format!("{}-{}", stem(w), stem(p.environment)),
-        None => stem(p.environment).to_string(),
-    }
+    stem(p.space).to_string()
 }
 
 /// A parametric scenario's two spaces, parsed, plus what they said. Read once per parametric scenario rather than once per
 /// seed: it is the same pair of files every time.
 struct Spaces {
-    env: EnvironmentSpace,
-    work: Option<WorkloadSpace>,
+    space: Space,
     fp: String,
 }
 
@@ -317,24 +307,14 @@ fn load_spaces(o: &Opts, p: &Parametric) -> Result<Spaces, String> {
         let path = o.suite_dir.join(rel);
         std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
     };
-    let env_src = read(p.environment)?;
-    let work_src = p.workload.map(read).transpose()?;
-    Ok(Spaces {
-        env: EnvironmentSpace::from_json(&env_src)?,
-        work: work_src.as_deref().map(WorkloadSpace::from_json).transpose()?,
-        fp: fingerprint(&env_src, work_src.as_deref()),
-    })
+    let src = read(p.space)?;
+    Ok(Spaces { space: Space::from_json(&src)?, fp: fingerprint(&src) })
 }
 
 /// Where a drawn scenario came from, stored beside the journal so a seed can be read back as the
 /// run it actually named.
 fn provenance(p: &Parametric, sp: &Spaces, seed: u64) -> Drawn {
-    Drawn {
-        seed,
-        environment: p.environment.to_string(),
-        workload: p.workload.map(str::to_string),
-        fingerprint: sp.fp.clone(),
-    }
+    Drawn { seed, space: p.space.to_string(), fingerprint: sp.fp.clone() }
 }
 
 fn load_scenario(path: &Path) -> Result<Scenario, String> {
@@ -401,7 +381,7 @@ fn replays_identically(o: &Opts, suite: &Suite) -> Result<String, String> {
             let sp = load_spaces(o, p).map_err(|e| format!("FAILED: {e}"))?;
             (
                 format!("{} seed 1", label(p)),
-                Scenario::draw(1, &sp.env, sp.work.as_ref()).from(provenance(p, &sp, 1)),
+                Scenario::draw(1, &sp.space).from(provenance(p, &sp, 1)),
             )
         }
         None => match suite.written.first() {
@@ -469,13 +449,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
             .max(8); // a floor, so a suite with one short name still reads as a column
         println!("parametric:");
         for p in suite.parametric {
-            println!(
-                "  {:<w$} {} seeds from {}{}",
-                label(p),
-                p.seeds,
-                p.environment,
-                p.workload.map(|x| format!(" and {x}")).unwrap_or_default()
-            );
+            println!("  {:<w$} {} seeds from {}", label(p), p.seeds, p.space);
         }
         println!("written:");
         for x in suite.written {
@@ -526,7 +500,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         let mut fails: Vec<(u64, String)> = vec![];
         for seed in lo..=hi {
             let dir = o.out.join(&name_of).join(seed.to_string());
-            let sc = Scenario::draw(seed, &sp.env, sp.work.as_ref()).from(provenance(p, &sp, seed));
+            let sc = Scenario::draw(seed, &sp.space).from(provenance(p, &sp, seed));
             match run_once(&o, &dir, sc.clone()) {
                 Err(e) => fails.push((seed, e)),
                 Ok(()) => match load_events(&dir) {
@@ -634,17 +608,8 @@ mod tests {
     /// because that name addresses a run directory and a `--only` selector.
     #[test]
     fn a_pairing_is_named_by_its_coordinates() {
-        let both = Parametric {
-            environment: "environments/clean.json",
-            workload: Some("workloads/mutex.json"),
-            seeds: 1,
-        };
-        assert_eq!(label(&both), "mutex-clean");
-
-        // A failure detector has no workload, so its environment names it on its own.
-        let alone =
-            Parametric { environment: "environments/crashes.json", workload: None, seeds: 1 };
-        assert_eq!(label(&alone), "crashes");
+        let p = Parametric { space: "spaces/mutex-no-crash.json", seeds: 1 };
+        assert_eq!(label(&p), "mutex-no-crash");
     }
 
     #[test]
