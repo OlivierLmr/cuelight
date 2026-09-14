@@ -50,8 +50,8 @@ fn a_run_replays_byte_identical() {
         return;
     }
     let (a, b) = (tmp("replay-a"), tmp("replay-b"));
-    assert!(run(&a, &["--seed", "5", "--fifo"], "chatter.py").0);
-    assert!(run(&b, &["--seed", "5", "--fifo"], "chatter.py").0);
+    assert!(run(&a, &["--seed", "5", "--environment", "testdata/env-fifo.json"], "chatter.py").0);
+    assert!(run(&b, &["--seed", "5", "--environment", "testdata/env-fifo.json"], "chatter.py").0);
     assert_eq!(journal(&a), journal(&b), "same scenario, different journal");
 }
 
@@ -75,8 +75,9 @@ fn check_reports_determinism() {
     assert!(String::from_utf8_lossy(&o.stdout).contains("DETERMINISTIC"));
 }
 
-/// `--fifo` must actually order the link, and its absence must actually reorder. Otherwise the
-/// flag could be a silent no-op and Lamport's mutex would appear to work without ordered channels.
+/// An environment asking for FIFO must actually order the link, and one that does not must
+/// actually reorder. Otherwise the field could be a silent no-op and Lamport's mutex would appear
+/// to work without ordered channels.
 #[test]
 fn fifo_orders_a_link_and_its_absence_does_not() {
     if !have_python() {
@@ -92,18 +93,18 @@ fn fifo_orders_a_link_and_its_absence_does_not() {
     };
 
     let ordered = tmp("fifo-on");
-    assert!(run(&ordered, &["--seed", "1", "--no-faults", "--fifo"], "ordering.py").0);
+    assert!(run(&ordered, &["--seed", "1", "--environment", "testdata/env-fifo-clean.json"], "ordering.py").0);
     let got = deliveries(&ordered);
     assert!(!got.is_empty(), "the fixture delivered nothing");
-    assert!(got.windows(2).all(|w| w[0] < w[1]), "--fifo left the link unordered: {got:?}");
+    assert!(got.windows(2).all(|w| w[0] < w[1]), "fifo: true left the link unordered: {got:?}");
 
     // Without it, at least one seed must scramble the same burst, or jitter is not doing its job.
     let scrambled = (1..15).any(|seed| {
         let out = tmp(&format!("fifo-off-{seed}"));
-        run(&out, &["--seed", &seed.to_string(), "--no-faults"], "ordering.py").0
+        run(&out, &["--seed", &seed.to_string()], "ordering.py").0
             && !deliveries(&out).windows(2).all(|w| w[0] < w[1])
     });
-    assert!(scrambled, "no seed reordered the link: jitter cannot reorder, so --fifo is a no-op");
+    assert!(scrambled, "no seed reordered the link: jitter cannot reorder, so fifo is a no-op");
 }
 
 /// A node that exits on its own fails the run. The tool knows which crashes it injected, and a
@@ -117,7 +118,7 @@ fn a_node_that_exits_on_its_own_fails_the_run() {
     std::fs::write(&script, "import sys\nsys.stdin.readline()\n").unwrap();
     let out = tmp("quitter");
     let o = Command::new(BIN)
-        .args(["run", "--seed", "1", "--no-faults", "--out"])
+        .args(["run", "--seed", "1", "--out"])
         .arg(&out)
         .arg("--bin")
         .arg("python3")
@@ -180,7 +181,7 @@ fn the_journal_keeps_its_contract() {
         return;
     }
     let out = tmp("contract");
-    assert!(run(&out, &["--seed", "8", "--fifo"], "chatter.py").0);
+    assert!(run(&out, &["--seed", "8", "--environment", "testdata/env-fifo.json"], "chatter.py").0);
     let lines: Vec<serde_json::Value> = journal(&out)
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -207,7 +208,7 @@ fn a_run_directory_holds_what_a_checker_needs() {
         return;
     }
     let out = tmp("dir");
-    assert!(run(&out, &["--seed", "1", "--no-faults"], "chatter.py").0);
+    assert!(run(&out, &["--seed", "1"], "chatter.py").0);
     assert!(out.join("journal.jsonl").is_file());
     assert!(out.join("scenario.json").is_file(), "scenario.json is part of the contract");
     for i in 0..4 {
