@@ -1,5 +1,8 @@
 [workspace]
 members = ["cuelight-suite"]
+# Named explicitly, or a bare `cargo test` runs the root package only and the suite crate's
+# tests never execute. That silence is how a release once shipped with a red target.
+default-members = [".", "cuelight-suite"]
 
 [package]
 name = "cuelight"

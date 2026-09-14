@@ -370,6 +370,10 @@ fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
 
 /// Replay one case and compare the two journals, before judging anything.
 ///
+/// The error carries its own banner, because two very different things fail here and a newcomer
+/// meets the other one first: a node that is not written yet dies on its first event, and calling
+/// that "not deterministic" sends them looking for a clock they never used.
+///
 /// A node that reads the system clock, spawns a thread or draws unseeded randomness produces a
 /// different run every time. Every verdict below would then describe a run nobody can reproduce,
 /// and the replay command printed under each failure would replay something else. So this runs
@@ -383,14 +387,17 @@ fn replays_identically(o: &Opts, suite: &Suite) -> Result<String, String> {
     // that reads the clock then collects a green verdict.
     let (what, sc) = match suite.pairings.first() {
         Some(p) => {
-            let sp = load_spaces(o, p)?;
+            let sp = load_spaces(o, p).map_err(|e| format!("FAILED: {e}"))?;
             (
                 format!("{} seed 1", label(p)),
                 Scenario::draw(1, &sp.env, sp.work.as_ref()).from(provenance(p, &sp, 1)),
             )
         }
         None => match suite.written.first() {
-            Some(w) => (stem(w.path).to_string(), load_scenario(&o.suite_dir.join(w.path))?),
+            Some(w) => (
+                stem(w.path).to_string(),
+                load_scenario(&o.suite_dir.join(w.path)).map_err(|e| format!("FAILED: {e}"))?,
+            ),
             None => return Ok(String::new()),
         },
     };
@@ -398,9 +405,10 @@ fn replays_identically(o: &Opts, suite: &Suite) -> Result<String, String> {
     let mut runs = vec![];
     for pass in ["a", "b"] {
         let dir = o.out.join("replay").join(pass);
-        run_once(o, &dir, sc.clone())?;
+        run_once(o, &dir, sc.clone()).map_err(|e| format!("FAILED: {e}"))?;
         let j = dir.join("journal.jsonl");
-        let text = std::fs::read_to_string(&j).map_err(|e| format!("{}: {e}", j.display()))?;
+        let text =
+            std::fs::read_to_string(&j).map_err(|e| format!("FAILED: {}: {e}", j.display()))?;
         runs.push((j, text));
     }
 
@@ -419,7 +427,7 @@ fn replays_identically(o: &Opts, suite: &Suite) -> Result<String, String> {
         .unwrap_or_else(|| runs[0].1.lines().count().min(runs[1].1.lines().count()) + 1);
 
     Err(format!(
-        "replaying {what} does not give the same journal twice.\n\
+        "NOT DETERMINISTIC: replaying {what} does not give the same journal twice.\n\
          \x20 First difference on line {line}. A system clock, a thread, or unseeded randomness.\n\
          \x20 compare {}\n\
          \x20     and {}",
@@ -484,7 +492,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
     match replays_identically(&o, &suite) {
         Ok(what) if what.is_empty() => {}
         Ok(what) => println!("deterministic: replaying {what} gives the same journal twice\n"),
-        Err(e) => { eprintln!("NOT DETERMINISTIC: {e}"); return ExitCode::FAILURE }
+        Err(e) => { eprintln!("{e}"); return ExitCode::FAILURE }
     }
 
     let mut all_ok = true;
