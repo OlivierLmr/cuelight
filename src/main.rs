@@ -3,7 +3,7 @@
 //! Every behaviour lives in the library, so that a checker calling `cuelight` as a dependency and a
 //! person typing `cuelight run` exercise the same code.
 
-use cuelight::scenario::{ExpandOpts, Scenario, StimulusSpec};
+use cuelight::scenario::{fingerprint, Drawn, EnvironmentSpace, Scenario, WorkloadSpace};
 use cuelight::{sim, viz};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -16,22 +16,18 @@ USAGE:
     cuelight run    [options] --bin <cmd...>    one run
     cuelight check  [options] --bin <cmd...>    run twice, verify identical journals
     cuelight viz    --journal <path> [--out <path>]
-    cuelight scenario [options]                 print an expanded scenario, to edit by hand
+    cuelight scenario [options]                 print a drawn scenario, to edit by hand
 
 The harness executes one scenario and records what happened; it never judges. Loop over seeds
 from your own checker and point it at the journal each run writes (see JOURNAL.md).
 
 OPTIONS:
     --bin <cmd...>     command launching one node (MUST BE LAST: swallows the rest of the line)
-    --scenario <path>  replay a stored scenario instead of expanding a seed
-    --seed <s>         seed to expand                [default: 1]
-    --nodes <n>        node count                    [default: 4]
-    --faults <f>       crashes tolerated             [default: 1]
-    --no-faults        expand a clean run
-    --fifo             per-link FIFO ordering (some algorithms need it)
-    --stimuli <path>   workload template to expand   [default: none]
-    --time-limit <t>   logical time limit            [default: 10000]
-    --watchdog <ms>    wall-clock hang detector      [default: 5000]
+    --scenario <path>  replay a stored scenario instead of drawing one
+    --seed <s>         seed to draw from              [default: 1]
+    --environment <p>  what the run undergoes         [default: every field pinned, no faults]
+    --workload <p>     what it is asked to do         [default: none]
+    --watchdog <ms>    wall-clock hang detector       [default: 5000]
     --out <dir>        run directory                 [default: store/latest]
     --journal <path>   viz: journal to render
 ";
@@ -41,12 +37,14 @@ struct Args {
     scenario_path: Option<PathBuf>,
     journal: Option<PathBuf>,
     seed: u64,
-    nodes: usize,
-    f: usize,
-    with_faults: bool,
-    fifo: bool,
-    stimuli: Option<StimulusSpec>,
-    time_limit: u64,
+    env: EnvironmentSpace,
+    /// Kept beside the parsed spaces so a drawn scenario can record where it came from, and what
+    /// the files said at the time.
+    env_name: String,
+    env_src: String,
+    work: Option<WorkloadSpace>,
+    work_name: Option<String>,
+    work_src: Option<String>,
     watchdog: u64,
     out: PathBuf,
 }
@@ -58,12 +56,12 @@ impl Default for Args {
             scenario_path: None,
             journal: None,
             seed: 1,
-            nodes: 4,
-            f: 1,
-            with_faults: true,
-            fifo: false,
-            stimuli: None,
-            time_limit: 10_000,
+            env: EnvironmentSpace::from_json("{}").expect("empty object is every default"),
+            env_name: "(defaults)".into(),
+            env_src: "{}".into(),
+            work: None,
+            work_name: None,
+            work_src: None,
             watchdog: 5_000,
             out: PathBuf::from("store/latest"),
         }
@@ -88,19 +86,24 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--scenario" => { a.scenario_path = Some(PathBuf::from(val(i)?)); i += 2 }
             "--journal" => { a.journal = Some(PathBuf::from(val(i)?)); i += 2 }
             "--seed" => { a.seed = val(i)?.parse().map_err(|_| "bad --seed")?; i += 2 }
-            "--nodes" => { a.nodes = val(i)?.parse().map_err(|_| "bad --nodes")?; i += 2 }
-            "--faults" => { a.f = val(i)?.parse().map_err(|_| "bad --faults")?; i += 2 }
-            "--time-limit" => { a.time_limit = val(i)?.parse().map_err(|_| "bad --time-limit")?; i += 2 }
             "--watchdog" => { a.watchdog = val(i)?.parse().map_err(|_| "bad --watchdog")?; i += 2 }
             "--out" => { a.out = PathBuf::from(val(i)?); i += 2 }
-            "--stimuli" => {
+            "--environment" => {
                 let p = val(i)?;
                 let raw = std::fs::read_to_string(&p).map_err(|e| format!("{p}: {e}"))?;
-                a.stimuli = Some(StimulusSpec::from_json(&raw)?);
+                a.env = EnvironmentSpace::from_json(&raw)?;
+                a.env_name = p;
+                a.env_src = raw;
                 i += 2
             }
-            "--no-faults" => { a.with_faults = false; i += 1 }
-            "--fifo" => { a.fifo = true; i += 1 }
+            "--workload" => {
+                let p = val(i)?;
+                let raw = std::fs::read_to_string(&p).map_err(|e| format!("{p}: {e}"))?;
+                a.work = Some(WorkloadSpace::from_json(&raw)?);
+                a.work_name = Some(p);
+                a.work_src = Some(raw);
+                i += 2
+            }
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -112,17 +115,12 @@ fn scenario_for(a: &Args, seed: u64) -> Result<Scenario, String> {
         Some(p) => Scenario::from_json(
             &std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?,
         ),
-        None => Ok(Scenario::expand(
+        None => Ok(Scenario::draw(seed, &a.env, a.work.as_ref()).from(Drawn {
             seed,
-            &ExpandOpts {
-                nodes: a.nodes,
-                f: a.f,
-                time_limit: a.time_limit,
-                fifo: a.fifo,
-                with_faults: a.with_faults,
-                stimuli: a.stimuli.clone(),
-            },
-        )),
+            environment: a.env_name.clone(),
+            workload: a.work_name.clone(),
+            fingerprint: fingerprint(&a.env_src, a.work_src.as_deref()),
+        })),
     }
 }
 
@@ -209,7 +207,7 @@ fn main() -> ExitCode {
             }
         }
 
-        // Dump-to-edit: the starting point for a hand-authored directed test.
+        // Dump-to-edit: the starting point for a scenario written by hand.
         "scenario" => match scenario_for(&a, a.seed) {
             Ok(sc) => { println!("{}", sc.to_json()); ExitCode::SUCCESS }
             Err(e) => { eprintln!("error: {e}"); ExitCode::FAILURE }

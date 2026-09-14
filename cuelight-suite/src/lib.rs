@@ -2,20 +2,21 @@
 //!
 //! cuelight executes one scenario and records what happened. It has no notion of success: it does
 //! not know what a property is, or what a test is. Everything on this side of that line lives here:
-//! running campaigns, loading journals, dating liveness from the effective GST, and printing a
+//! drawing scenarios over seeds, loading journals, dating liveness from the effective GST, and printing a
 //! verdict.
 //!
-//! A caller supplies a [`Suite`]: its campaigns, its directed scenarios with the failures it
+//! A caller supplies a [`Suite`]: its pairings, its written scenarios with the failures it
 //! *expects*, and one function that turns a run into a [`Report`]. This crate never inspects that
 //! function; it calls it.
 //!
 //! ```no_run
-//! use cuelight_suite::{Campaign, Events, Kind, Report, Scenario, Suite};
+//! use cuelight_suite::{Events, Kind, Pairing, Report, Scenario, Suite};
 //! use std::process::ExitCode;
 //!
-//! static CAMPAIGNS: &[Campaign] = &[Campaign {
-//!     label: "steady", stimuli: "stimuli/steady.json", fifo: true, faults: true,
-//!     nodes: &[4, 7, 10], seeds: 200,
+//! static PAIRINGS: &[Pairing] = &[Pairing {
+//!     environment: "environments/steady.json",
+//!     workload: Some("workloads/steady.json"),
+//!     seeds: 200,
 //! }];
 //!
 //! fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
@@ -24,13 +25,13 @@
 //!
 //! fn main() -> ExitCode {
 //!     cuelight_suite::run(
-//!         Suite { name: "mine", campaigns: CAMPAIGNS, directed: &[], check },
+//!         Suite { name: "mine", pairings: PAIRINGS, written: &[], check },
 //!         env!("CARGO_MANIFEST_DIR"),
 //!     )
 //! }
 //! ```
 
-use cuelight::scenario::{ExpandOpts, Fault, StimulusSpec};
+use cuelight::scenario::{fingerprint, Drawn, EnvironmentSpace, Fault, WorkloadSpace};
 use cuelight::sim;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -39,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-/// The scenario that was run, as cuelight expanded or loaded it.
+/// The scenario that was run, as cuelight drew or loaded it.
 pub use cuelight::Scenario;
 
 // ---------------------------------------------------------------- properties
@@ -153,24 +154,22 @@ pub fn load_events(dir: &Path) -> Result<Events, String> {
 
 // ------------------------------------------------------------------- a suite
 
-/// A seed campaign: the same stimulus template expanded over many seeds.
+/// One row of the test plan: a workload in an environment, drawn over many seeds.
 ///
 /// One run proves nothing. The bugs a course like this is about show up on a minority of seeds: a
 /// student running once has a 90% chance of concluding a broken mutex works.
-pub struct Campaign {
-    pub label: &'static str,
-    /// Stimulus template, relative to the suite directory. Empty means the workload is the faults
-    /// alone, which is what a failure detector driven by crashes and time needs.
-    pub stimuli: &'static str,
-    pub fifo: bool,
-    /// False expands a clean run, the right setting for an algorithm that assumes no failures.
-    pub faults: bool,
-    /// Node counts to sweep, one picked per seed. `&[4]` pins the run to four, as before.
-    ///
-    /// A suite that declares more than one is checking that its algorithms read the group size
-    /// from `init` rather than assuming it. `f` follows from `n = 3f+1`, so a size of 4, 7 or 10
-    /// tolerates 1, 2 or 3 crashes; a size that leaves `f = 0` would quietly stop injecting any.
-    pub nodes: &'static [usize],
+///
+/// Pairings are listed rather than crossed, because not every crossing is legal. Lamport's mutex
+/// assumes no crashes, so pairing it with an environment that injects them would produce a
+/// deadlock that is the correct behaviour, not a bug. Listing makes "this is never tested with
+/// crashes" one visible line instead of a property nobody rereads.
+pub struct Pairing {
+    /// Environment space, relative to the suite directory. Shared between suites that assume the
+    /// same model.
+    pub environment: &'static str,
+    /// Workload space, relative to the suite directory. `None` means the faults are the whole
+    /// workload, which is what a failure detector driven by crashes and time needs.
+    pub workload: Option<&'static str>,
     pub seeds: u64,
 }
 
@@ -178,7 +177,7 @@ pub struct Campaign {
 ///
 /// `expect_fail` is not a formality. A scenario can exist to show what an algorithm's assumptions
 /// cost when they do not hold, and a suite that could only say "all green" could not express one.
-pub struct Directed {
+pub struct Written {
     /// Scenario path, relative to the suite directory.
     pub path: &'static str,
     pub expect_fail: &'static [&'static str],
@@ -187,8 +186,10 @@ pub struct Directed {
 
 pub struct Suite {
     pub name: &'static str,
-    pub campaigns: &'static [Campaign],
-    pub directed: &'static [Directed],
+    pub pairings: &'static [Pairing],
+    /// Scenarios written by hand. Immune to any change in the draw, which is why the cases worth
+    /// keeping live here rather than as a seed.
+    pub written: &'static [Written],
     pub check: fn(&Events, &Scenario, &mut Report),
 }
 
@@ -200,16 +201,16 @@ struct Opts {
     seeds: Option<u64>,
     /// Inclusive seed range. Debugging one failure should not mean re-running the other 199.
     range: Option<(u64, u64)>,
-    /// Substring selecting which campaigns and directed scenarios to run.
+    /// Substring selecting which pairings and written scenarios to run.
     only: Option<String>,
     list: bool,
     watchdog: u64,
     program: Vec<String>,
 }
 
-/// The name a directed scenario is selected by: its file stem.
+/// The name a written scenario is selected by: its file stem.
 fn stem(path: &str) -> &str {
-    Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("directed")
+    Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("written")
 }
 
 fn usage(name: &str) -> String {
@@ -224,11 +225,11 @@ OPTIONS:
     --bin <cmd...>     command launching one node (MUST BE LAST: swallows the rest of the line)
     --suite-dir <path> where this suite's scenarios/ and stimuli/ live
     --out <dir>        run directory                 [default: store/<suite>]
-    --seeds <n>        override every campaign's seed count
-    --seed <a>[..<b>]  run one seed, or an inclusive range, instead of a whole campaign
-    --only <name>      run only what matches: a campaign label or a scenario name
+    --seeds <n>        override every pairing's seed count
+    --seed <a>[..<b>]  run one seed, or an inclusive range, instead of every seed
+    --only <name>      run only what matches: a pairing's name or a written scenario's
     --watchdog <ms>    wall-clock hang detector      [default: 5000]
-    --list             show the campaigns and scenarios this suite defines, then exit
+    --list             show the pairings and scenarios this suite defines, then exit
 "
     )
 }
@@ -283,25 +284,46 @@ fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, 
     Ok(o)
 }
 
-/// How a campaign's seeds expand: its own switches, and its stimulus template read from disk.
-/// The size this seed runs at, and the failures that size tolerates.
-///
-/// Picked from the seed rather than drawn, so a failure replays at the size it failed at: the
-/// scenario written beside the journal records it, and the replay command reproduces it.
-fn size_for(c: &Campaign, seed: u64) -> (usize, usize) {
-    let n = if c.nodes.is_empty() { 4 } else { c.nodes[(seed as usize) % c.nodes.len()] };
-    (n, (n - 1) / 3)
+/// A pairing is named by its coordinates. Two file names already say which workload ran in which
+/// environment, and a label of its own would be a third name to keep true.
+fn label(p: &Pairing) -> String {
+    match p.workload {
+        Some(w) => format!("{}-{}", stem(w), stem(p.environment)),
+        None => stem(p.environment).to_string(),
+    }
 }
 
-fn expand_opts(o: &Opts, c: &Campaign) -> Result<ExpandOpts, String> {
-    let stimuli = if c.stimuli.is_empty() {
-        None
-    } else {
-        let p = o.suite_dir.join(c.stimuli);
-        let raw = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-        Some(StimulusSpec::from_json(&raw)?)
+/// A pairing's two spaces, parsed, plus what they said. Read once per pairing rather than once per
+/// seed: it is the same pair of files every time.
+struct Spaces {
+    env: EnvironmentSpace,
+    work: Option<WorkloadSpace>,
+    fp: String,
+}
+
+fn load_spaces(o: &Opts, p: &Pairing) -> Result<Spaces, String> {
+    let read = |rel: &str| -> Result<String, String> {
+        let path = o.suite_dir.join(rel);
+        std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
     };
-    Ok(ExpandOpts { fifo: c.fifo, with_faults: c.faults, stimuli, ..ExpandOpts::default() })
+    let env_src = read(p.environment)?;
+    let work_src = p.workload.map(read).transpose()?;
+    Ok(Spaces {
+        env: EnvironmentSpace::from_json(&env_src)?,
+        work: work_src.as_deref().map(WorkloadSpace::from_json).transpose()?,
+        fp: fingerprint(&env_src, work_src.as_deref()),
+    })
+}
+
+/// Where a drawn scenario came from, stored beside the journal so a seed can be read back as the
+/// run it actually named.
+fn provenance(p: &Pairing, sp: &Spaces, seed: u64) -> Drawn {
+    Drawn {
+        seed,
+        environment: p.environment.to_string(),
+        workload: p.workload.map(str::to_string),
+        fingerprint: sp.fp.clone(),
+    }
 }
 
 fn load_scenario(path: &Path) -> Result<Scenario, String> {
@@ -311,7 +333,7 @@ fn load_scenario(path: &Path) -> Result<Scenario, String> {
 
 /// Render the sequence diagram beside the journal.
 ///
-/// Only for runs worth opening: a campaign deletes the seeds that pass, and rendering hundreds of
+/// Only for runs worth opening: a sweep deletes the seeds that pass, and rendering hundreds of
 /// diagrams nobody looks at would be waste.
 fn draw(dir: &Path) -> Option<PathBuf> {
     let out = dir.join("messages.mmd");
@@ -355,10 +377,20 @@ fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
 ///
 /// Two runs, against several hundred: the cost is invisible.
 fn replays_identically(o: &Opts, suite: &Suite) -> Result<String, String> {
-    let (what, sc) = match suite.directed.first() {
-        Some(d) => (stem(d.path).to_string(), load_scenario(&o.suite_dir.join(d.path))?),
-        None => match suite.campaigns.first() {
-            Some(c) => (format!("{} seed 1", c.label), Scenario::expand(1, &expand_opts(o, c)?)),
+    // A drawn scenario from the first pairing, not the first written one. A written scenario is
+    // usually written *because* it is degenerate, and replaying one where every node dies at t=1
+    // compares two empty journals: the check passes without having exercised anything, and a node
+    // that reads the clock then collects a green verdict.
+    let (what, sc) = match suite.pairings.first() {
+        Some(p) => {
+            let sp = load_spaces(o, p)?;
+            (
+                format!("{} seed 1", label(p)),
+                Scenario::draw(1, &sp.env, sp.work.as_ref()).from(provenance(p, &sp, 1)),
+            )
+        }
+        None => match suite.written.first() {
+            Some(w) => (stem(w.path).to_string(), load_scenario(&o.suite_dir.join(w.path))?),
             None => return Ok(String::new()),
         },
     };
@@ -409,20 +441,26 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         // Pad to the longest name this suite actually declares. A fixed width fits one suite and
         // runs the description into the name of every other.
         let w = suite
-            .campaigns
+            .pairings
             .iter()
-            .map(|c| c.label.len())
-            .chain(suite.directed.iter().map(|d| stem(d.path).len()))
+            .map(|p| label(p).len())
+            .chain(suite.written.iter().map(|x| stem(x.path).len()))
             .max()
             .unwrap_or(0)
             .max(8); // a floor, so a suite with one short name still reads as a column
-        println!("campaigns:");
-        for c in suite.campaigns {
-            println!("  {:<w$} {} seeds, fifo={}, faults={}", c.label, c.seeds, c.fifo, c.faults);
+        println!("drawn:");
+        for p in suite.pairings {
+            println!(
+                "  {:<w$} {} seeds from {}{}",
+                label(p),
+                p.seeds,
+                p.environment,
+                p.workload.map(|x| format!(" and {x}")).unwrap_or_default()
+            );
         }
-        println!("directed scenarios:");
-        for d in suite.directed {
-            println!("  {:<w$} {}", stem(d.path), d.why);
+        println!("written:");
+        for x in suite.written {
+            println!("  {:<w$} {}", stem(x.path), x.why);
         }
         return ExitCode::SUCCESS;
     }
@@ -434,8 +472,8 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
 
     // Nothing matched is a mistake, not an empty run: silently doing nothing looks like success.
     if let Some(pat) = &o.only {
-        let known = suite.campaigns.iter().any(|c| c.label.contains(pat.as_str()))
-            || suite.directed.iter().any(|d| stem(d.path).contains(pat.as_str()));
+        let known = suite.pairings.iter().any(|p| label(p).contains(pat.as_str()))
+            || suite.written.iter().any(|x| stem(x.path).contains(pat.as_str()));
         if !known {
             eprintln!("--only {pat} matches nothing. `--list` shows what this suite defines.");
             return ExitCode::FAILURE;
@@ -451,26 +489,25 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
 
     let mut all_ok = true;
 
-    for c in suite.campaigns {
+    for p in suite.pairings {
+        let name_of = label(p);
         if let Some(pat) = &o.only {
-            if !c.label.contains(pat.as_str()) {
+            if !name_of.contains(pat.as_str()) {
                 continue;
             }
         }
-        // Read once per campaign rather than once per seed: it is the same template every time.
-        let opts = match expand_opts(&o, c) {
+        let sp = match load_spaces(&o, p) {
             Ok(x) => x,
-            Err(e) => { println!("{}: {e}", c.label); all_ok = false; continue }
+            Err(e) => { println!("{name_of}: {e}"); all_ok = false; continue }
         };
 
-        let seeds = o.seeds.unwrap_or(c.seeds);
+        let seeds = o.seeds.unwrap_or(p.seeds);
         let (lo, hi) = o.range.unwrap_or((1, seeds));
         let mut pass = 0u64;
         let mut fails: Vec<(u64, String)> = vec![];
         for seed in lo..=hi {
-            let dir = o.out.join(c.label).join(seed.to_string());
-            let (nodes, f) = size_for(c, seed);
-            let sc = Scenario::expand(seed, &ExpandOpts { nodes, f, ..opts.clone() });
+            let dir = o.out.join(&name_of).join(seed.to_string());
+            let sc = Scenario::draw(seed, &sp.env, sp.work.as_ref()).from(provenance(p, &sp, seed));
             match run_once(&o, &dir, sc.clone()) {
                 Err(e) => fails.push((seed, e)),
                 Ok(()) => match load_events(&dir) {
@@ -488,12 +525,14 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
                 },
             }
         }
-        println!("{}: {pass}/{} seeds passed{}", c.label, hi - lo + 1,
+        println!("{name_of}: {pass}/{} seeds passed{}", hi - lo + 1,
                  if o.range.is_some() { format!(" (seeds {lo}..{hi})") } else { String::new() });
         for (s, e) in fails.iter().take(5) {
+            // The address of a failure is the triple, not the seed: a seed names a run only
+            // relative to the two spaces it was drawn from.
             println!("  seed {s}: {e}");
-            how_to_replay(&name, &o, &format!("--seed {s} --only {}", c.label));
-            where_to_read(&o.out.join(c.label).join(s.to_string()));
+            how_to_replay(&name, &o, &format!("--seed {s} --only {name_of}"));
+            where_to_read(&o.out.join(&name_of).join(s.to_string()));
         }
         if fails.len() > 5 {
             println!("  ... and {} more", fails.len() - 5);
@@ -501,8 +540,8 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         all_ok &= fails.is_empty();
     }
 
-    for d in suite.directed {
-        // A directed test has no seed, so asking for one means asking for campaigns only.
+    for d in suite.written {
+        // A written scenario has no seed, so asking for one means asking for drawn runs only.
         if o.range.is_some() {
             continue;
         }
@@ -513,7 +552,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         }
         let path = o.suite_dir.join(d.path);
         let stem = stem(d.path);
-        let dir = o.out.join("directed").join(stem);
+        let dir = o.out.join("written").join(stem);
         println!("\n{}: {}", d.path, d.why);
         let sc = match load_scenario(&path) {
             Ok(sc) => sc,
@@ -528,7 +567,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
                     (suite.check)(&ev, &sc, &mut r);
                     r.print();
                     let got = r.failed();
-                    // Expected-failure is the point of some directed scenarios: a suite that could
+                    // Expected-failure is the point of some written scenarios: a suite that could
                     // only say "all green" could not express them.
                     if got == d.expect_fail {
                         println!("  → as expected");
@@ -537,7 +576,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
                         how_to_replay(&name, &o, &format!("--only {stem}"));
                         all_ok = false;
                     }
-                    // Always, even when it behaved: a directed scenario is often run precisely to
+                    // Always, even when it behaved: a written scenario is often run precisely to
                     // be looked at, and the diagram is the reason to look.
                     where_to_read(&dir);
                 }
@@ -562,35 +601,22 @@ mod tests {
         Scenario::from_json(json).expect("scenario")
     }
 
-    fn camp(nodes: &'static [usize]) -> Campaign {
-        Campaign { label: "c", stimuli: "", fifo: true, faults: true, nodes, seeds: 1 }
-    }
-
+    /// The group size is no longer the suite's business: it follows from `f` in the environment
+    /// space, and is tested there. What is this crate's business is that a pairing can be named,
+    /// because that name addresses a run directory and a `--only` selector.
     #[test]
-    fn one_size_pins_every_seed_to_it() {
-        let c = camp(&[4]);
-        assert!((0..10).all(|s| size_for(&c, s) == (4, 1)));
-    }
+    fn a_pairing_is_named_by_its_coordinates() {
+        let both = Pairing {
+            environment: "environments/clean.json",
+            workload: Some("workloads/mutex.json"),
+            seeds: 1,
+        };
+        assert_eq!(label(&both), "mutex-clean");
 
-    #[test]
-    fn several_sizes_cycle_with_the_seed() {
-        let c = camp(&[4, 7, 10]);
-        let got: Vec<usize> = (0..7).map(|s| size_for(&c, s).0).collect();
-        assert_eq!(got, vec![4, 7, 10, 4, 7, 10, 4]);
-    }
-
-    #[test]
-    fn failures_follow_from_the_size() {
-        let c = camp(&[4, 7, 10]);
-        assert_eq!(
-            (0..3).map(|s| size_for(&c, s)).collect::<Vec<_>>(),
-            vec![(4, 1), (7, 2), (10, 3)]
-        );
-    }
-
-    #[test]
-    fn no_size_declared_means_four() {
-        assert_eq!(size_for(&camp(&[]), 7), (4, 1));
+        // A failure detector has no workload, so its environment names it on its own.
+        let alone =
+            Pairing { environment: "environments/crashes.json", workload: None, seeds: 1 };
+        assert_eq!(label(&alone), "crashes");
     }
 
     #[test]

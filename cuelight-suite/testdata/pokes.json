@@ -1,0 +1,2 @@
+{ "stimuli": [ { "count": [2, 5], "at_frac": [0.1, 0.5],
+                 "body": { "type": "poke", "id": "p<i>" } } ] }

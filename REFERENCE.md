@@ -1,7 +1,7 @@
 # cuelight reference
 
 Everything you look up rather than read: what crosses the wire, what cuelight can do to your nodes,
-what a scenario contains, how a workload template expands, and every option of both binaries.
+what a scenario contains, what a seed draws one from, and every option of both binaries.
 
 Start at the [README](README.md); the journal format has its own file, [JOURNAL.md](JOURNAL.md).
 
@@ -23,7 +23,7 @@ cuelight interprets only messages addressed to `"harness"`. Anything addressed t
 |---|---|
 | `init` | `node_id`, `node_ids`, `n`, `f`, `provided`. Once, at t=0 |
 | `timer` | a timer you armed has expired (`timer_id`) |
-| *anything else* | a **stimulus** from the workload template; its shape is yours to define |
+| *anything else* | a **stimulus** from the workload space; its shape is yours to define |
 
 **You send it:**
 
@@ -47,7 +47,7 @@ need; cuelight records it and never interprets it.
 
 Plus, on every link: a delay drawn per link, larger before **GST** and small after it; a jitter
 that scales with the link's own delay so reordering is actually possible; and an optional
-per-link **FIFO** mode (`--fifo`) for algorithms that require ordered channels.
+per-link **FIFO** mode for algorithms that require ordered channels.
 
 GST, the *Global Stabilisation Time*, is the instant after which delays become bounded. Before
 it, the network may behave arbitrarily badly. It is what makes partial synchrony testable.
@@ -62,6 +62,8 @@ into a bug report.
 
 ```json
 {
+  "drawn": {"seed": 7, "environment": "environments/crashes.json",
+            "workload": "workloads/ping.json", "fingerprint": "30a18569c5cd0c51"},
   "nodes": 3, "f": 1, "gst": 2678, "time_limit": 10000, "fifo": true,
   "delay_pre":  [[0,341,205],[194,0,255],[137,214,0]],
   "delay_post": [[0,16,2],[7,0,18],[3,5,0]],
@@ -75,31 +77,76 @@ into a bug report.
 }
 ```
 
-Every field has a default, so a hand-written directed test can be as small as
-`{"nodes": 4, "stimuli": [...]}`. To author one, start from a generated scenario and edit it:
+`drawn` is provenance, and only a drawn scenario has it: a seed names a run only relative to the
+spaces it came from, and the fingerprint covers both of them plus the version of the draw itself.
+Edit a space and the fingerprint moves, which is the point. One written by hand came from nobody
+and carries none of this.
+
+Every other field has a default, so a scenario written by hand can be as small as
+`{"nodes": 4, "stimuli": [...]}`. To author one, start from a drawn scenario and edit it:
 
 ```sh
-cuelight scenario --seed 7 --nodes 4 --fifo > my-test.json
+cuelight scenario --seed 7 --environment environments/crashes.json > my-test.json
 cuelight run --scenario my-test.json --bin ./my-node
 ```
 
-## Workloads
+## Spaces
 
 
-cuelight ships **no** workload of its own: poking a node with `do_broadcast` or `propose` would
-mean knowing what those mean. You supply a template, and it expands against the seed:
+A seed draws a scenario from two spaces. Both are JSON, and **every field has the same shape**: a
+scalar pins it, a two-element array draws it from an **inclusive** range. A pinned field consumes
+no randomness, so pinning one does not repoint the draws after it.
+
+### The environment space: what a run undergoes
 
 ```json
-{ "events": [ { "count": [3, 9], "at_frac": [0.0, 0.5],
-                "body": { "type": "ping", "id": "m<i>" } } ] }
+{ "f": [1, 3], "time_limit": 10000, "gst_frac": [0.10, 0.33],
+  "link_delay_pre": [1, 400], "link_delay_post": [1, 25],
+  "jitter_pct": 100, "fifo": true,
+  "crashes":    { "at_frac": [0.0, 0.7] },
+  "pauses":     { "count": [0, 2], "at_frac": [0.0, 0.6], "duration": [10, 400] },
+  "partitions": { "count": [0, 1], "at_frac": [0.0, 0.6], "duration": [50, 600] } }
 ```
 
-`count` draws how many events; `at` or `at_frac` when; `per_node` emits one per node instead of a
-drawn count; `<i>` inside a string becomes the event index; `{"$rand": [lo, hi]}` becomes a drawn
-integer. Pass it with `--stimuli`.
+`f` is the fault budget and the group size follows it, `n = 3f + 1`, so `[1, 3]` sweeps 4, 7 and
+10 nodes. Declared this way round because `f` is the free parameter and `n` the consequence.
 
-The draw order is part of what a seed *means*: change it and every stored seed silently starts
-describing a different run.
+A fault kind that is absent never happens. `crashes` has no count: how many is `[0, f]` by the
+definition of the model, not a setting. Pauses and partitions are omissions rather than crashes,
+are not budgeted against `f`, and so carry counts of their own. A partition cuts a proper non-empty
+subset, drawn.
+
+An environment describes a model of computation rather than an algorithm, so one file serves every
+suite that assumes that model.
+
+### The workload space: what it is asked to do
+
+cuelight ships **no** workload of its own: poking a node with `do_broadcast` or `propose` would
+mean knowing what those mean.
+
+```json
+{ "stimuli": [
+    { "id": "ping", "count": [3, 9], "at_frac": [0.0, 0.5],
+      "body": { "type": "ping", "id": "m<i>", "size": { "$rand": [1, 64] } } },
+    { "after": "ping", "delay": [1, 20], "body": { "type": "ping-again" } } ] }
+```
+
+`count` draws how many; `at_frac` draws when, as a fraction of the time limit; `per_node` emits one
+per node instead of a drawn count and a drawn node; `<i>` inside a string becomes the event index;
+`{"$rand": [lo, hi]}` becomes a drawn integer.
+
+`after` names an earlier group and emits one event per event of it, on the same node, `delay` later.
+Uniform instants reach "do the thing, then immediately do it again" rarely, and that shape hides a
+class of bugs. It may only refer backwards, which is what makes a cycle impossible.
+
+There is no absolute `at`: the time limit lives in the environment, so an absolute instant would
+mean something different in each pairing it is used in.
+
+### What a seed means
+
+The draw order is fixed by the schema, never by the order of keys in a file: reordering two keys
+must not repoint every stored seed. Editing a space does repoint them, which is what the
+fingerprint is there to say out loud.
 
 ## Reading the result
 
@@ -126,19 +173,16 @@ has no sweep of its own, because pruning the runs that passed would mean knowing
 cuelight run    [options] --bin <cmd...>    one run
 cuelight check  [options] --bin <cmd...>    run twice, verify identical journals
 cuelight viz    --journal <path>            Mermaid sequence diagram
-cuelight scenario [options]                 print an expanded scenario, to edit by hand
+cuelight scenario [options]                 print a drawn scenario, to edit by hand
 ```
 
 | Option | |
 |---|---|
 | `--bin <cmd...>` | command launching one node. **Must be last**, it swallows the rest of the line |
-| `--scenario <path>` | replay a stored scenario instead of expanding a seed |
-| `--seed <s>` | seed to expand (default 1) |
-| `--nodes <n>` / `--faults <f>` | node count (4) and crashes tolerated (1) |
-| `--no-faults` | expand a clean run |
-| `--fifo` | per-link FIFO ordering |
-| `--stimuli <path>` | workload template |
-| `--time-limit <t>` | logical time limit (10000) |
+| `--scenario <path>` | replay a stored scenario instead of drawing one |
+| `--seed <s>` | seed to draw from (default 1) |
+| `--environment <path>` | environment space. Omitted, every field takes its default and no faults happen |
+| `--workload <path>` | workload space. Omitted, there are no stimuli |
 | `--watchdog <ms>` | wall-clock hang detector (5000) |
 | `--out <dir>` | run directory (`store/latest`) |
 | `--journal <path>` | the journal `viz` renders |
@@ -150,11 +194,11 @@ A binary built on `cuelight-suite` parses these for you, identically whatever it
 | Option | |
 |---|---|
 | `--bin <cmd...>` | command launching one node. **Must be last** |
-| `--suite-dir <path>` | where this suite's `scenarios/` and `stimuli/` live |
+| `--suite-dir <path>` | where this suite's `scenarios/`, `environments/` and `workloads/` live |
 | `--out <dir>` | run directory (`store/<suite>`) |
-| `--seeds <n>` | override every campaign's seed count |
-| `--seed <a>[..<b>]` | one seed, or an inclusive range, instead of a whole campaign |
-| `--only <name>` | run only what matches: a campaign label or a scenario name |
+| `--seeds <n>` | override every pairing's seed count |
+| `--seed <a>[..<b>]` | one seed, or an inclusive range, instead of every seed |
+| `--only <name>` | run only what matches: a pairing's name, or a written scenario's |
 | `--watchdog <ms>` | wall-clock hang detector (5000) |
 | `--list` | show what this suite declares, then exit |
 
