@@ -10,7 +10,7 @@
 //! # The three public modules
 //!
 //! [`scenario`] builds what to run, [`sim`] runs it, [`viz`] renders what happened. A caller
-//! expands a seed into a [`Scenario`], hands it to a [`Sim`] with the command that launches one
+//! draws a [`Scenario`] from a seed, hands it to a [`Sim`] with the command that launches one
 //! node, and reads the journal the run writes.
 //!
 //! ```no_run

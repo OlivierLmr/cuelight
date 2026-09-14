@@ -207,7 +207,7 @@ fn main() -> ExitCode {
             }
         }
 
-        // Dump-to-edit: the starting point for a hand-authored directed test.
+        // Dump-to-edit: the starting point for a scenario written by hand.
         "scenario" => match scenario_for(&a, a.seed) {
             Ok(sc) => { println!("{}", sc.to_json()); ExitCode::SUCCESS }
             Err(e) => { eprintln!("error: {e}"); ExitCode::FAILURE }
