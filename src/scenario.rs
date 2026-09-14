@@ -689,14 +689,32 @@ mod tests {
     }
 
     #[test]
-    fn a_scalar_is_a_range_of_width_zero() {
-        // And, being pinned, it must consume no randomness: pinning one field cannot be allowed to
-        // repoint the draws that follow it.
-        let pinned = Scenario::draw(1, &env(r#"{"f": 1, "jitter_pct": 100}"#), None);
-        let absent = Scenario::draw(1, &env(r#"{"f": 1}"#), None);
-        assert_eq!(pinned.jitter_pct, 100);
-        assert_eq!(pinned.gst, absent.gst);
-        assert_eq!(pinned.delay_pre, absent.delay_pre);
+    fn a_scalar_and_a_range_of_width_zero_are_the_same_thing() {
+        // Not just the same value: the same run. A width-zero range must draw nothing, or the two
+        // ways of pinning a field would mean different things.
+        let e = r#"{"f": F, "crashes": {}, "pauses": {"count": [0, 2]}}"#;
+        for seed in 1..30 {
+            let scalar = Scenario::draw(seed, &env(&e.replace("F", "2")), None);
+            let range = Scenario::draw(seed, &env(&e.replace("F", "[2, 2]")), None);
+            assert_eq!(scalar.to_json(), range.to_json(), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn changing_a_pinned_field_changes_that_field_and_nothing_else() {
+        // True of fields carried straight into the scenario. `f` decides the group size and
+        // `time_limit` scales every instant, so pinning either moves far more than itself.
+        let base = r#"{"f": 2, "crashes": {}, "pauses": {"count": [0, 2]}, "#;
+        let quiet = env(&format!(r#"{base}"jitter_pct": 100, "fifo": false}}"#));
+        let loud = env(&format!(r#"{base}"jitter_pct": 900, "fifo": true}}"#));
+        for seed in 1..30 {
+            let a = Scenario::draw(seed, &quiet, None);
+            let b = Scenario::draw(seed, &loud, None);
+            assert_eq!((a.jitter_pct, a.fifo), (100, false));
+            assert_eq!((b.jitter_pct, b.fifo), (900, true));
+            assert_eq!((a.gst, &a.delay_pre), (b.gst, &b.delay_pre), "seed {seed}");
+            assert_eq!(format!("{:?}", a.faults), format!("{:?}", b.faults), "seed {seed}");
+        }
     }
 
     #[test]
