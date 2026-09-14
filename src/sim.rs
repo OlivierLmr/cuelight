@@ -97,7 +97,7 @@ impl Sim {
             index.insert(id.clone(), i);
         }
 
-        let rng = Rng::new(cfg.scenario.seed ^ 0xD1B5_4A32_D192_ED03);
+        let rng = Rng::new(cfg.scenario.seed() ^ 0xD1B5_4A32_D192_ED03);
         Ok(Sim {
             rng,
             nodes,

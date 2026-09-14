@@ -1,0 +1,11 @@
+{
+  "nodes": 2, "f": 1, "gst": 10, "time_limit": 1000,
+  "faults": [
+    {"kind": "crash", "at": 1, "node": "n0"},
+    {"kind": "crash", "at": 1, "node": "n1"}
+  ],
+  "stimuli": [
+    {"at": 500, "node": "n0", "body": {"type": "poke", "id": "p0"}},
+    {"at": 500, "node": "n1", "body": {"type": "poke", "id": "p1"}}
+  ]
+}

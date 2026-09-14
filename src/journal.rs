@@ -16,7 +16,7 @@ use std::path::Path;
 /// journalling it as it arrived would make two nodes that behaved identically look different. The
 /// journal is compared, by the determinism check and by anyone diffing two runs, so it is written
 /// in one canonical form.
-fn canonical(v: &Value) -> Value {
+pub(crate) fn canonical(v: &Value) -> Value {
     match v {
         Value::Object(m) => {
             let mut keys: Vec<&String> = m.keys().collect();
