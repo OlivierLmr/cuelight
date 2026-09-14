@@ -317,6 +317,17 @@ fn provenance(p: &Parametric, sp: &Spaces, seed: u64) -> Drawn {
     Drawn { seed, space: p.space.to_string(), fingerprint: sp.fp.clone() }
 }
 
+/// Events a scenario schedules past its own time limit, which the run will never reach.
+///
+/// Not the same thing as a run that ends at the limit: an algorithm driven by timers, a failure
+/// detector above all, keeps going until something stops it, and that is normal. This is a space
+/// that asks for what cannot happen, and it would otherwise shrink the workload in silence.
+fn past_the_limit(sc: &Scenario) -> usize {
+    let late = |t: u64| t >= sc.time_limit;
+    sc.stimuli.iter().filter(|s| late(s.at)).count()
+        + sc.faults.iter().filter(|f| late(f.at())).count()
+}
+
 fn load_scenario(path: &Path) -> Result<Scenario, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     Scenario::from_json(&raw)
@@ -501,15 +512,18 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         for seed in lo..=hi {
             let dir = o.out.join(&name_of).join(seed.to_string());
             let sc = Scenario::draw(seed, &sp.space).from(provenance(p, &sp, seed));
+            let late = past_the_limit(&sc);
+            if late > 0 {
+                fails.push((
+                    seed,
+                    format!("{late} event(s) scheduled past the time limit; they cannot happen"),
+                ));
+                continue;
+            }
             match run_once(&o, &dir, sc.clone()) {
                 Err(e) => fails.push((seed, e)),
                 Ok(()) => match load_events(&dir) {
                     Err(e) => fails.push((seed, e)),
-                    Ok(ev) if ev.truncated => fails.push((
-                        seed,
-                        "run cut at the time limit; its tail never happened, so nothing was judged"
-                            .into(),
-                    )),
                     Ok(ev) => {
                         let mut r = Report::default();
                         (suite.check)(&ev, &sc, &mut r);
@@ -560,10 +574,6 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
             Err(e) => { println!("  did not run: {e}"); all_ok = false }
             Ok(()) => match load_events(&dir) {
                 Err(e) => { println!("  {e}"); all_ok = false }
-                Ok(ev) if ev.truncated => {
-                    println!("  cut at the time limit; its tail never happened, so nothing judged");
-                    all_ok = false
-                }
                 Ok(ev) => {
                     let mut r = Report::default();
                     (suite.check)(&ev, &sc, &mut r);
@@ -601,6 +611,18 @@ mod tests {
 
     fn sc(json: &str) -> Scenario {
         Scenario::from_json(json).expect("scenario")
+    }
+
+    /// A run that ends at the limit is normal, and a space that schedules past it is not: those
+    /// events never happen, so the workload shrinks in silence.
+    #[test]
+    fn events_past_the_limit_are_counted() {
+        let inside = sc(r#"{"time_limit": 100, "stimuli": [{"at": 99, "node": "n0", "body": {}}]}"#);
+        assert_eq!(past_the_limit(&inside), 0);
+        let outside = sc(r#"{"time_limit": 100,
+            "stimuli": [{"at": 100, "node": "n0", "body": {}}, {"at": 400, "node": "n1", "body": {}}],
+            "faults": [{"kind": "crash", "at": 250, "node": "n2"}]}"#);
+        assert_eq!(past_the_limit(&outside), 3);
     }
 
     /// The group size is no longer the suite's business: it follows from `f` in the environment
