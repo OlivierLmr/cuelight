@@ -377,16 +377,20 @@ fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
 ///
 /// Two runs, against several hundred: the cost is invisible.
 fn replays_identically(o: &Opts, suite: &Suite) -> Result<String, String> {
-    let (what, sc) = match suite.written.first() {
-        Some(w) => (stem(w.path).to_string(), load_scenario(&o.suite_dir.join(w.path))?),
-        None => match suite.pairings.first() {
-            Some(p) => {
-                let sp = load_spaces(o, p)?;
-                (
-                    format!("{} seed 1", label(p)),
-                    Scenario::draw(1, &sp.env, sp.work.as_ref()).from(provenance(p, &sp, 1)),
-                )
-            }
+    // A drawn scenario from the first pairing, not the first written one. A written scenario is
+    // usually written *because* it is degenerate, and replaying one where every node dies at t=1
+    // compares two empty journals: the check passes without having exercised anything, and a node
+    // that reads the clock then collects a green verdict.
+    let (what, sc) = match suite.pairings.first() {
+        Some(p) => {
+            let sp = load_spaces(o, p)?;
+            (
+                format!("{} seed 1", label(p)),
+                Scenario::draw(1, &sp.env, sp.work.as_ref()).from(provenance(p, &sp, 1)),
+            )
+        }
+        None => match suite.written.first() {
+            Some(w) => (stem(w.path).to_string(), load_scenario(&o.suite_dir.join(w.path))?),
             None => return Ok(String::new()),
         },
     };

@@ -16,6 +16,7 @@
 
 use crate::journal::canonical;
 use crate::rng::Rng;
+use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 
@@ -44,11 +45,23 @@ enum SpanRepr<T> {
     Two([T; 2]),
 }
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Span<T> {
+impl<'de, T> Deserialize<'de> for Span<T>
+where
+    T: Deserialize<'de> + PartialOrd + std::fmt::Debug,
+{
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Ok(match SpanRepr::deserialize(d)? {
             SpanRepr::One(v) => Span::Pinned(v),
-            SpanRepr::Two([a, b]) => Span::Range(a, b),
+            SpanRepr::Two([a, b]) => {
+                // Rejected rather than tolerated. A backwards range would otherwise pin silently
+                // to its first element, and a typo in a bound is invisible from the results.
+                if b < a {
+                    return Err(de::Error::custom(format!(
+                        "range [{a:?}, {b:?}] runs backwards; write it [low, high], inclusive"
+                    )));
+                }
+                Span::Range(a, b)
+            }
         })
     }
 }
@@ -458,7 +471,8 @@ impl Scenario {
             // Heal well before the end: a split still open at the limit makes any convergence
             // check meaningless, because the run would end mid-disagreement.
             let latest_heal = time_limit * 8 / 10;
-            let k = p.count.draw(&mut r);
+            // Two sides need two nodes: a proper non-empty subset of a group of one has no answer.
+            let k = if n < 2 { 0 } else { p.count.draw(&mut r) };
             for _ in 0..k {
                 let at = ((p.at_frac.draw(&mut r) * time_limit as f64) as u64).clamp(1, last);
                 let duration =
@@ -868,6 +882,240 @@ mod tests {
         assert_ne!(fingerprint(a, None), fingerprint(changed, None));
         // A workload is part of what a seed means, so adding one must move the fingerprint.
         assert_ne!(fingerprint(a, None), fingerprint(a, Some(r#"{"stimuli":[]}"#)));
+    }
+
+
+    // ------------------------------------------------------------- a sweep
+
+    /// Environment spaces chosen to reach every branch of the draw, including the degenerate ones.
+    const ENVIRONMENTS: &[&str] = &[
+        r#"{}"#,
+        r#"{"f": 0, "partitions": {"count": 2}}"#,
+        r#"{"f": [0, 3], "crashes": {}, "pauses": {"count": [0, 3]}, "partitions": {"count": [0, 2]}}"#,
+        r#"{"f": 3, "crashes": {"at_frac": [0.0, 1.0]}}"#,
+        r#"{"f": [1, 2], "time_limit": [200, 4000], "gst_frac": [0.0, 1.0]}"#,
+        r#"{"f": 1, "fifo": [false, true], "jitter_pct": [0, 300]}"#,
+        r#"{"f": 2, "link_delay_pre": 7, "link_delay_post": [0, 0]}"#,
+        r#"{"f": 1, "time_limit": 2, "crashes": {}, "pauses": {"count": 2}, "partitions": {"count": 2}}"#,
+        r#"{"f": [1, 3], "partitions": {"count": 3, "at_frac": [0.0, 1.0], "duration": [1, 9000]}}"#,
+    ];
+
+    const WORKLOADS: &[&str] = &[
+        r#"{"stimuli": []}"#,
+        r#"{"stimuli":[{"count":[0,6],"at_frac":[0.0,1.0],"body":{"type":"x","v":{"$rand":[0,9]}}}]}"#,
+        r#"{"stimuli":[{"per_node":true,"at_frac":[0.0,0.9],"body":{"type":"p","id":"m<i>"}}]}"#,
+        r#"{"stimuli":[{"id":"a","count":[1,4],"at_frac":[0.9,1.0],"body":{"type":"a"}},
+                       {"after":"a","delay":[1,5000],"body":{"type":"b"}}]}"#,
+        r#"{"stimuli":[{"id":"a","count":[1,3],"at_frac":[0.0,0.2],"body":{"type":"a"}},
+                       {"id":"b","after":"a","delay":[1,10],"body":{"type":"b"}},
+                       {"after":"b","delay":[1,10],"body":{"type":"c"}}]}"#,
+        r#"{"stimuli":[{"id":"a","count":0,"at_frac":0.1,"body":{"type":"a"}},
+                       {"after":"a","delay":[1,10],"body":{"type":"b"}}]}"#,
+    ];
+
+    /// Every invariant the rest of the tool assumes, over every branch, on many seeds.
+    ///
+    /// The targeted tests above each pin one behaviour. This is what says no combination of space
+    /// and seed produces something the simulator or a checker would have to cope with: an instant
+    /// outside the run, a partition with nobody on one side, a node name that does not exist.
+    #[test]
+    fn the_draw_holds_its_invariants_everywhere() {
+        for (ei, esrc) in ENVIRONMENTS.iter().enumerate() {
+            let e = env(esrc);
+            for (wi, wsrc) in WORKLOADS.iter().enumerate() {
+                let w = work(wsrc);
+                for seed in 1..40u64 {
+                    let where_ = format!("env {ei}, workload {wi}, seed {seed}");
+                    let sc = Scenario::draw(seed, &e, Some(&w));
+                    let last = sc.time_limit - 1;
+                    let names: Vec<String> = (0..sc.nodes).map(|i| format!("n{i}")).collect();
+
+                    assert_eq!(sc.nodes, 3 * sc.f + 1, "{where_}: n = 3f+1");
+                    assert!(sc.time_limit >= 2 && sc.gst <= sc.time_limit, "{where_}");
+
+                    assert_eq!(sc.delay_pre.len(), sc.nodes, "{where_}");
+                    for i in 0..sc.nodes {
+                        for j in 0..sc.nodes {
+                            let (a, b) = (sc.delay_pre[i][j], sc.delay_post[i][j]);
+                            if i == j {
+                                assert_eq!((a, b), (0, 0), "{where_}: a node delays to itself");
+                            } else {
+                                assert!(a >= 1 && b >= 1, "{where_}: zero delay on {i}->{j}");
+                            }
+                        }
+                    }
+
+                    let mut crashed: Vec<&str> = vec![];
+                    for f in &sc.faults {
+                        assert!((1..=last).contains(&f.at()), "{where_}: fault at {}", f.at());
+                        match f {
+                            Fault::Crash { node, .. } => {
+                                assert!(names.contains(node), "{where_}: crash on {node}");
+                                assert!(!crashed.contains(&node.as_str()), "{where_}: twice");
+                                crashed.push(node);
+                            }
+                            Fault::Pause { node, duration, .. } => {
+                                assert!(names.contains(node), "{where_}: pause on {node}");
+                                assert!(*duration >= 1, "{where_}: pause of nothing");
+                            }
+                            Fault::Partition { at, duration, side } => {
+                                assert!(!side.is_empty(), "{where_}: partition with an empty side");
+                                assert!(side.len() < sc.nodes, "{where_}: partition of everyone");
+                                assert!(side.iter().all(|s| names.contains(s)), "{where_}");
+                                let mut seen = side.clone();
+                                seen.sort();
+                                seen.dedup();
+                                assert_eq!(seen.len(), side.len(), "{where_}: a node listed twice");
+                                assert!(*duration >= 1, "{where_}");
+                                // Heals before the end, unless it started at or after the
+                                // deadline, where a split cannot last less than one tick.
+                                let heal = sc.time_limit * 8 / 10;
+                                assert!(
+                                    *at >= heal || at + duration <= heal,
+                                    "{where_}: split {at}+{duration} outlives {heal}"
+                                );
+                            }
+                        }
+                    }
+                    let n_crashes =
+                        sc.faults.iter().filter(|f| matches!(f, Fault::Crash { .. })).count();
+                    assert!(n_crashes <= sc.f, "{where_}: {n_crashes} crashes for f={}", sc.f);
+                    assert!(sc.faults.windows(2).all(|p| p[0].at() <= p[1].at()), "{where_}");
+                    for f in &sc.faults {
+                        if let Fault::Pause { node, .. } = f {
+                            assert!(!crashed.contains(&node.as_str()), "{where_}: pausing the dead");
+                        }
+                    }
+
+                    for st in &sc.stimuli {
+                        assert!(st.at <= last, "{where_}: stimulus at {} past {last}", st.at);
+                        assert!(names.contains(&st.node), "{where_}: stimulus for {}", st.node);
+                    }
+                    assert!(sc.stimuli.windows(2).all(|p| p[0].at <= p[1].at), "{where_}: unsorted");
+
+                    // The whole point of the tool: the same inputs give the same run.
+                    let again = Scenario::draw(seed, &e, Some(&w));
+                    assert_eq!(sc.to_json(), again.to_json(), "{where_}: draw is not a function");
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------- paths the sweep cannot assert
+
+    #[test]
+    fn a_drawn_fraction_covers_its_range() {
+        // Pinned would satisfy every invariant above while making gst_frac a dead field.
+        let e = env(r#"{"f": 1, "time_limit": 10000, "gst_frac": [0.10, 0.33]}"#);
+        let gsts: Vec<u64> = (1..200).map(|s| Scenario::draw(s, &e, None).gst).collect();
+        assert!(gsts.iter().all(|g| (1000..=3300).contains(g)), "outside [0.10, 0.33]");
+        let (lo, hi) = (gsts.iter().min().unwrap(), gsts.iter().max().unwrap());
+        assert!(*lo < 1200 && *hi > 3100, "only reached {lo}..{hi} of 1000..3300");
+    }
+
+    #[test]
+    fn a_drawn_flag_reaches_both_values() {
+        let e = env(r#"{"f": 1, "fifo": [false, true]}"#);
+        let seen: Vec<bool> = (1..40).map(|s| Scenario::draw(s, &e, None).fifo).collect();
+        assert!(seen.contains(&true) && seen.contains(&false));
+        // And pinning it still means pinning it.
+        let pinned = env(r#"{"f": 1, "fifo": true}"#);
+        assert!((1..40).all(|s| Scenario::draw(s, &pinned, None).fifo));
+    }
+
+    #[test]
+    fn the_time_limit_can_be_drawn_and_everything_follows_it() {
+        let e = env(r#"{"f": 1, "time_limit": [500, 600], "gst_frac": 0.5, "crashes": {}}"#);
+        for seed in 1..40 {
+            let sc = Scenario::draw(seed, &e, None);
+            assert!((500..=600).contains(&sc.time_limit));
+            assert_eq!(sc.gst, sc.time_limit / 2);
+            assert!(sc.faults.iter().all(|f| f.at() < sc.time_limit));
+        }
+    }
+
+    #[test]
+    fn a_backwards_range_is_refused_for_every_kind_of_value() {
+        let cases = [
+            r#"{"link_delay_pre": [400, 1]}"#,
+            r#"{"gst_frac": [0.9, 0.1]}"#,
+            r#"{"fifo": [true, false]}"#,
+        ];
+        for src in cases {
+            let err = EnvironmentSpace::from_json(src).expect_err(&format!("{src} must be refused"));
+            assert!(err.contains("runs backwards"), "{err}");
+        }
+        // The right way round is fine, including a range of width zero.
+        assert!(EnvironmentSpace::from_json(r#"{"link_delay_pre": [7, 7]}"#).is_ok());
+    }
+
+    #[test]
+    fn a_group_of_one_node_cannot_be_partitioned() {
+        // f = 0 leaves a single node. Asking for a proper non-empty subset of it has no answer,
+        // and used to panic inside the generator rather than say so.
+        let sc = Scenario::draw(1, &env(r#"{"f": 0, "partitions": {"count": 3}}"#), None);
+        assert_eq!(sc.nodes, 1);
+        assert!(sc.faults.is_empty());
+    }
+
+    #[test]
+    fn a_follower_that_would_land_past_the_end_is_brought_back_inside() {
+        // Otherwise the count of stimuli would depend on the delay drawn, and a workload would
+        // quietly shrink near the time limit.
+        let w = work(
+            r#"{"stimuli":[{"id":"a","count":[4,4],"at_frac":[0.99,1.0],"body":{"type":"a"}},
+                           {"after":"a","delay":[5000,9000],"body":{"type":"b"}}]}"#,
+        );
+        let sc = Scenario::draw(2, &env(r#"{"f": 1, "time_limit": 1000}"#), Some(&w));
+        assert_eq!(sc.stimuli.len(), 8, "a follower must never be dropped");
+        assert!(sc.stimuli.iter().all(|s| s.at <= 999));
+    }
+
+    #[test]
+    fn a_chain_of_followers_resolves_in_order() {
+        let w = work(
+            r#"{"stimuli":[{"id":"a","count":[3,3],"at_frac":[0.0,0.1],"body":{"type":"a"}},
+                           {"id":"b","after":"a","delay":[10,10],"body":{"type":"b"}},
+                           {"after":"b","delay":[20,20],"body":{"type":"c"}}]}"#,
+        );
+        let sc = Scenario::draw(5, &env(r#"{"f": 1}"#), Some(&w));
+        assert_eq!(sc.stimuli.len(), 9);
+        for c in sc.stimuli.iter().filter(|s| s.body["type"] == "c") {
+            let b = sc
+                .stimuli
+                .iter()
+                .find(|s| s.body["type"] == "b" && s.node == c.node && s.at + 20 == c.at)
+                .expect("no b twenty before its c, on the same node");
+            assert!(sc
+                .stimuli
+                .iter()
+                .any(|a| a.body["type"] == "a" && a.node == b.node && a.at + 10 == b.at));
+        }
+    }
+
+    #[test]
+    fn following_a_group_that_produced_nothing_produces_nothing() {
+        let w = work(
+            r#"{"stimuli":[{"id":"a","count":0,"at_frac":0.1,"body":{"type":"a"}},
+                           {"after":"a","delay":[1,10],"body":{"type":"b"}}]}"#,
+        );
+        assert!(Scenario::draw(1, &env(r#"{"f": 1}"#), Some(&w)).stimuli.is_empty());
+    }
+
+    #[test]
+    fn provenance_survives_a_round_trip() {
+        let e = env(r#"{"f": 1}"#);
+        let sc = Scenario::draw(3, &e, None).from(Drawn {
+            seed: 3,
+            environment: "environments/clean.json".into(),
+            workload: None,
+            fingerprint: fingerprint(r#"{"f": 1}"#, None),
+        });
+        let back = Scenario::from_json(&sc.to_json()).expect("round trip");
+        assert_eq!(back.seed(), 3);
+        let d = back.drawn.expect("provenance kept");
+        assert_eq!((d.seed, d.environment.as_str()), (3, "environments/clean.json"));
+        assert_eq!(d.fingerprint, fingerprint(r#"{"f": 1}"#, None));
     }
 
     #[test]
