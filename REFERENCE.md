@@ -23,7 +23,7 @@ cuelight interprets only messages addressed to `"harness"`. Anything addressed t
 |---|---|
 | `init` | `node_id`, `node_ids`, `n`, `f`, `provided`. Once, at t=0 |
 | `timer` | a timer you armed has expired (`timer_id`) |
-| *anything else* | a **stimulus** from the workload space; its shape is yours to define |
+| *anything else* | a **stimulus** from the space; its shape is yours to define |
 
 **You send it:**
 
@@ -62,8 +62,7 @@ into a bug report.
 
 ```json
 {
-  "drawn": {"seed": 7, "environment": "environments/crashes.json",
-            "workload": "workloads/ping.json", "fingerprint": "30a18569c5cd0c51"},
+  "drawn": {"seed": 7, "space": "spaces/crashes.json", "fingerprint": "30a18569c5cd0c51"},
   "nodes": 3, "f": 1, "gst": 2678, "time_limit": 10000, "fifo": true,
   "delay_pre":  [[0,341,205],[194,0,255],[137,214,0]],
   "delay_post": [[0,16,2],[7,0,18],[3,5,0]],
@@ -78,7 +77,7 @@ into a bug report.
 ```
 
 `drawn` is provenance, and only a drawn scenario has it: a seed names a run only relative to the
-spaces it came from, and the fingerprint covers both of them plus the version of the draw itself.
+space it came from, and the fingerprint covers that space plus the version of the draw itself.
 Edit a space and the fingerprint moves, which is the point. One written by hand came from nobody
 and carries none of this.
 
@@ -86,67 +85,63 @@ Every other field has a default, so a scenario written by hand can be as small a
 `{"nodes": 4, "stimuli": [...]}`. To author one, start from a drawn scenario and edit it:
 
 ```sh
-cuelight scenario --seed 7 --environment environments/crashes.json > my-test.json
+cuelight scenario --seed 7 --space spaces/crashes.json > my-test.json
 cuelight run --scenario my-test.json --bin ./my-node
 ```
 
 ## Spaces
 
+A seed draws a scenario from **one** space: the world a run happens in, and a tree of the events
+that befall it. Faults and stimuli are events of the same tree, because a crash and a request both
+have an instant and a subject.
 
-A seed draws a scenario from two spaces. Both are JSON, and **every field has the same shape**: a
-scalar pins it, a two-element array draws it from an **inclusive** range. A pinned field consumes
-no randomness, so pinning one does not repoint the draws after it.
-
-### The environment space: what a run undergoes
+**Every field has the same shape**: a scalar pins it, a two-element array draws it from an
+**inclusive** range. A pinned field consumes no randomness, so pinning one does not repoint the
+draws after it.
 
 ```json
 { "f": [1, 3], "time_limit": 10000, "gst_frac": [0.10, 0.33],
   "link_delay_pre": [1, 400], "link_delay_post": [1, 25],
   "jitter_pct": 100, "fifo": true,
-  "crashes":    { "at_frac": [0.0, 0.7] },
-  "pauses":     { "count": [0, 2], "at_frac": [0.0, 0.6], "duration": [10, 400] },
-  "partitions": { "count": [0, 1], "at_frac": [0.0, 0.6], "duration": [50, 600] } }
+  "events": [
+    { "nodes": { "distinct": 1 }, "at_frac": [0.0, 0.5],
+      "stimulus": { "type": "ping", "id": "m<i>" },
+      "then": [ { "delay": [1, 30], "crash": {} } ] },
+    { "count": [0, 1], "at_frac": [0.0, 0.6], "partition": { "duration": [50, 600] } } ] }
 ```
 
-`f` is the fault budget and the group size follows it, `n = 3f + 1`, so `[1, 3]` sweeps 4, 7 and
-10 nodes. Declared this way round because `f` is the free parameter and `n` the consequence.
+That first event says something the format could not say before: *one process pings, and the same
+one crashes shortly after*. The crash inherits its parent's process, which is why the language has
+no variables.
 
-A fault kind that is absent never happens. `crashes` has no count: how many is `[0, f]` by the
-definition of the model, not a setting. Pauses and partitions are omissions rather than crashes,
-are not budgeted against `f`, and so carry counts of their own. A partition cuts a proper non-empty
-subset, drawn.
+`f` is the fault budget and the group size follows it, `n = 3f + 1`, so `[1, 3]` sweeps 4, 7 and 10.
 
-An environment describes a model of computation rather than an algorithm, so one file serves every
-suite that assumes that model.
+**Who an event acts on**, and how many copies of it there are:
 
-### The workload space: what it is asked to do
+| | |
+|---|---|
+| `"nodes": "all"` | every process, once each |
+| `"nodes": {"distinct": k}` | k processes not already taken on the path from the root, so under a parent it reads as *someone other than mine* |
+| `"nodes": {"any": k}` | k draws with replacement |
+| `"count": k` | k copies bound to no process, for an effect that acts on none |
 
-cuelight ships **no** workload of its own: poking a node with `do_broadcast` or `propose` would
-mean knowing what those mean.
+**When**: a root places at `at_frac × time_limit`; a child at `parent + delay`, never negative, so
+a child never precedes its parent and the tree admits no cycle. A delay of zero is the same logical
+instant, which is how two events are made simultaneous; overlapping ranges on siblings leave their
+order to the seed.
 
-```json
-{ "stimuli": [
-    { "id": "ping", "count": [3, 9], "at_frac": [0.0, 0.5],
-      "body": { "type": "ping", "id": "m<i>", "size": { "$rand": [1, 64] } } },
-    { "after": "ping", "delay": [1, 20], "body": { "type": "ping-again" } } ] }
-```
+**What happens**: `stimulus` with a body the tool never reads, `crash: {}`, `pause` and `partition`
+with a duration. A partition cuts a proper non-empty subset, drawn rather than declared.
 
-`count` draws how many; `at_frac` draws when, as a fraction of the time limit; `per_node` emits one
-per node instead of a drawn count and a drawn node; `<i>` inside a string becomes the event index;
-`{"$rand": [lo, hi]}` becomes a drawn integer.
+Inside a body, `<i>` becomes the instance index and `{"$rand": [lo, hi]}` a drawn integer,
+inclusive. Integer spans admit one symbol, `f`, and no arithmetic.
 
-`after` names an earlier group and emits one event per event of it, on the same node, `delay` later.
-Uniform instants reach "do the thing, then immediately do it again" rarely, and that shape hides a
-class of bugs. It may only refer backwards, which is what makes a cycle impossible.
+**A subtree is instantiated once per selected process**, so a tree multiplies: `distinct: [3, 7]`
+over `distinct: [3, 7]` yields 9 to 49 events. Two levels read well; four do not.
 
-There is no absolute `at`: the time limit lives in the environment, so an absolute instant would
-mean something different in each parametric scenario it is used in.
-
-### What a seed means
-
-The draw order is fixed by the schema, never by the order of keys in a file: reordering two keys
-must not repoint every stored seed. Editing a space does repoint them, which is what the
-fingerprint is there to say out loud.
+**What a seed means.** The draw order is the depth-first walk, and within an event: subject, then
+placement, then the body, then children. It is fixed by the schema, never by the order of keys in
+the file. Inserting a sibling repoints every seed after it, which is what the fingerprint is for.
 
 ## Reading the result
 
@@ -181,8 +176,7 @@ cuelight scenario [options]                 print a drawn scenario, to edit by h
 | `--bin <cmd...>` | command launching one node. **Must be last**, it swallows the rest of the line |
 | `--scenario <path>` | replay a stored scenario instead of drawing one |
 | `--seed <s>` | seed to draw from (default 1) |
-| `--environment <path>` | environment space. Omitted, every field takes its default and no faults happen |
-| `--workload <path>` | workload space. Omitted, there are no stimuli |
+| `--space <path>` | the space to draw from. Omitted, every field takes its default and nothing happens |
 | `--watchdog <ms>` | wall-clock hang detector (5000) |
 | `--out <dir>` | run directory (`store/latest`) |
 | `--journal <path>` | the journal `viz` renders |
@@ -194,7 +188,7 @@ A binary built on `cuelight-suite` parses these for you, identically whatever it
 | Option | |
 |---|---|
 | `--bin <cmd...>` | command launching one node. **Must be last** |
-| `--suite-dir <path>` | where this suite's `scenarios/`, `environments/` and `workloads/` live |
+| `--suite-dir <path>` | where this suite's `scenarios/` and `spaces/` live |
 | `--out <dir>` | run directory (`store/<suite>`) |
 | `--seeds <n>` | override every parametric scenario's seed count |
 | `--seed <a>[..<b>]` | one seed, or an inclusive range, instead of every seed |

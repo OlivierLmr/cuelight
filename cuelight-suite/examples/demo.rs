@@ -8,14 +8,10 @@ use cuelight_suite::{Events, Kind, Parametric, Report, Scenario, Suite, Written}
 use std::process::ExitCode;
 
 static PARAMETRIC: &[Parametric] = &[
-    // A workload, and an environment quiet enough that every poke must be answered.
-    Parametric {
-        environment: "testdata/quiet.json",
-        workload: Some("testdata/pokes.json"),
-        seeds: 4,
-    },
-    // No workload at all: the faults are the whole of it, as for a failure detector.
-    Parametric { environment: "testdata/crashes.json", workload: None, seeds: 4 },
+    // Pokes, in a world quiet enough that every one of them must be answered.
+    Parametric { space: "testdata/quiet.json", seeds: 4 },
+    // No stimulus at all: the faults are the whole of it, as for a failure detector.
+    Parametric { space: "testdata/crashes.json", seeds: 4 },
 ];
 
 static WRITTEN: &[Written] = &[Written {

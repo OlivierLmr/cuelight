@@ -1,1 +1,4 @@
-{ "f": 1, "fifo": true }
+{ "f": 1, "fifo": true,
+  "events": [
+    { "nodes": { "any": [2, 5] }, "at_frac": [0.1, 0.5],
+      "stimulus": { "type": "poke", "id": "p<i>" } } ] }
