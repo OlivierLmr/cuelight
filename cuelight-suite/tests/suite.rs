@@ -77,7 +77,7 @@ fn a_node_that_answers_passes_every_pairing() {
     let (ok, text) = demo_run("green", "poked.py", &[]);
     assert!(ok, "{text}");
     assert!(text.contains("pokes-quiet: 4/4 seeds passed"), "{text}");
-    // A pairing with no workload is a pairing all the same.
+    // A parametric scenario with no workload is a parametric scenario all the same.
     assert!(text.contains("crashes: 4/4 seeds passed"), "{text}");
     assert!(text.contains("all good"), "{text}");
 }
@@ -146,7 +146,7 @@ fn only_runs_what_it_names_and_refuses_what_it_does_not() {
     let (ok, text) = demo_run("only", "poked.py", &["--only", "crashes"]);
     assert!(ok, "{text}");
     assert!(text.contains("crashes: 4/4"), "{text}");
-    assert!(!text.contains("pokes-quiet:"), "--only ran a pairing it did not name: {text}");
+    assert!(!text.contains("pokes-quiet:"), "--only ran a parametric scenario it did not name: {text}");
     assert!(!text.contains("nobody-home.json:"), "--only ran a written scenario too: {text}");
 
     // Matching nothing is a mistake, not an empty run: doing nothing quietly looks like success.

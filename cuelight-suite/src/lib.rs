@@ -5,15 +5,15 @@
 //! drawing scenarios over seeds, loading journals, dating liveness from the effective GST, and printing a
 //! verdict.
 //!
-//! A caller supplies a [`Suite`]: its pairings, its written scenarios with the failures it
+//! A caller supplies a [`Suite`]: its parametric, its written scenarios with the failures it
 //! *expects*, and one function that turns a run into a [`Report`]. This crate never inspects that
 //! function; it calls it.
 //!
 //! ```no_run
-//! use cuelight_suite::{Events, Kind, Pairing, Report, Scenario, Suite};
+//! use cuelight_suite::{Events, Kind, Parametric, Report, Scenario, Suite};
 //! use std::process::ExitCode;
 //!
-//! static PAIRINGS: &[Pairing] = &[Pairing {
+//! static PAIRINGS: &[Parametric] = &[Parametric {
 //!     environment: "environments/steady.json",
 //!     workload: Some("workloads/steady.json"),
 //!     seeds: 200,
@@ -25,7 +25,7 @@
 //!
 //! fn main() -> ExitCode {
 //!     cuelight_suite::run(
-//!         Suite { name: "mine", pairings: PAIRINGS, written: &[], check },
+//!         Suite { name: "mine", parametric: PAIRINGS, written: &[], check },
 //!         env!("CARGO_MANIFEST_DIR"),
 //!     )
 //! }
@@ -154,16 +154,16 @@ pub fn load_events(dir: &Path) -> Result<Events, String> {
 
 // ------------------------------------------------------------------- a suite
 
-/// One row of the test plan: a workload in an environment, drawn over many seeds.
+/// A parametric scenario: one scenario holding many runs, each one named by a seed.
 ///
-/// One run proves nothing. The bugs a course like this is about show up on a minority of seeds: a
-/// student running once has a 90% chance of concluding a broken mutex works.
+/// One run proves nothing. The bugs worth catching show up on a minority of seeds: running once
+/// has a 90% chance of concluding a broken implementation works.
 ///
-/// Pairings are listed rather than crossed, because not every crossing is legal. Lamport's mutex
-/// assumes no crashes, so pairing it with an environment that injects them would produce a
-/// deadlock that is the correct behaviour, not a bug. Listing makes "this is never tested with
+/// It pairs an environment with a workload, and those pairs are listed rather than crossed,
+/// because not every crossing is legal. An algorithm that assumes no crashes, paired with an
+/// environment that injects them, deadlocks — correctly. Listing makes "this is never run with
 /// crashes" one visible line instead of a property nobody rereads.
-pub struct Pairing {
+pub struct Parametric {
     /// Environment space, relative to the suite directory. Shared between suites that assume the
     /// same model.
     pub environment: &'static str,
@@ -186,7 +186,7 @@ pub struct Written {
 
 pub struct Suite {
     pub name: &'static str,
-    pub pairings: &'static [Pairing],
+    pub parametric: &'static [Parametric],
     /// Scenarios written by hand. Immune to any change in the draw, which is why the cases worth
     /// keeping live here rather than as a seed.
     pub written: &'static [Written],
@@ -201,7 +201,7 @@ struct Opts {
     seeds: Option<u64>,
     /// Inclusive seed range. Debugging one failure should not mean re-running the other 199.
     range: Option<(u64, u64)>,
-    /// Substring selecting which pairings and written scenarios to run.
+    /// Substring selecting which parametric and written scenarios to run.
     only: Option<String>,
     list: bool,
     watchdog: u64,
@@ -225,11 +225,11 @@ OPTIONS:
     --bin <cmd...>     command launching one node (MUST BE LAST: swallows the rest of the line)
     --suite-dir <path> where this suite's scenarios/ and stimuli/ live
     --out <dir>        run directory                 [default: store/<suite>]
-    --seeds <n>        override every pairing's seed count
+    --seeds <n>        override every parametric scenario's seed count
     --seed <a>[..<b>]  run one seed, or an inclusive range, instead of every seed
-    --only <name>      run only what matches: a pairing's name or a written scenario's
+    --only <name>      run only what matches: a parametric scenario's name or a written scenario's
     --watchdog <ms>    wall-clock hang detector      [default: 5000]
-    --list             show the pairings and scenarios this suite defines, then exit
+    --list             show the parametric and scenarios this suite defines, then exit
 "
     )
 }
@@ -284,16 +284,16 @@ fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, 
     Ok(o)
 }
 
-/// A pairing is named by its coordinates. Two file names already say which workload ran in which
+/// A parametric scenario is named by its coordinates. Two file names already say which workload ran in which
 /// environment, and a label of its own would be a third name to keep true.
-fn label(p: &Pairing) -> String {
+fn label(p: &Parametric) -> String {
     match p.workload {
         Some(w) => format!("{}-{}", stem(w), stem(p.environment)),
         None => stem(p.environment).to_string(),
     }
 }
 
-/// A pairing's two spaces, parsed, plus what they said. Read once per pairing rather than once per
+/// A parametric scenario's two spaces, parsed, plus what they said. Read once per parametric scenario rather than once per
 /// seed: it is the same pair of files every time.
 struct Spaces {
     env: EnvironmentSpace,
@@ -301,7 +301,7 @@ struct Spaces {
     fp: String,
 }
 
-fn load_spaces(o: &Opts, p: &Pairing) -> Result<Spaces, String> {
+fn load_spaces(o: &Opts, p: &Parametric) -> Result<Spaces, String> {
     let read = |rel: &str| -> Result<String, String> {
         let path = o.suite_dir.join(rel);
         std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
@@ -317,7 +317,7 @@ fn load_spaces(o: &Opts, p: &Pairing) -> Result<Spaces, String> {
 
 /// Where a drawn scenario came from, stored beside the journal so a seed can be read back as the
 /// run it actually named.
-fn provenance(p: &Pairing, sp: &Spaces, seed: u64) -> Drawn {
+fn provenance(p: &Parametric, sp: &Spaces, seed: u64) -> Drawn {
     Drawn {
         seed,
         environment: p.environment.to_string(),
@@ -381,11 +381,11 @@ fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
 ///
 /// Two runs, against several hundred: the cost is invisible.
 fn replays_identically(o: &Opts, suite: &Suite) -> Result<String, String> {
-    // A drawn scenario from the first pairing, not the first written one. A written scenario is
+    // A drawn scenario from the first parametric scenario, not the first written one. A written scenario is
     // usually written *because* it is degenerate, and replaying one where every node dies at t=1
     // compares two empty journals: the check passes without having exercised anything, and a node
     // that reads the clock then collects a green verdict.
-    let (what, sc) = match suite.pairings.first() {
+    let (what, sc) = match suite.parametric.first() {
         Some(p) => {
             let sp = load_spaces(o, p).map_err(|e| format!("FAILED: {e}"))?;
             (
@@ -449,15 +449,15 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         // Pad to the longest name this suite actually declares. A fixed width fits one suite and
         // runs the description into the name of every other.
         let w = suite
-            .pairings
+            .parametric
             .iter()
             .map(|p| label(p).len())
             .chain(suite.written.iter().map(|x| stem(x.path).len()))
             .max()
             .unwrap_or(0)
             .max(8); // a floor, so a suite with one short name still reads as a column
-        println!("drawn:");
-        for p in suite.pairings {
+        println!("parametric:");
+        for p in suite.parametric {
             println!(
                 "  {:<w$} {} seeds from {}{}",
                 label(p),
@@ -480,7 +480,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
 
     // Nothing matched is a mistake, not an empty run: silently doing nothing looks like success.
     if let Some(pat) = &o.only {
-        let known = suite.pairings.iter().any(|p| label(p).contains(pat.as_str()))
+        let known = suite.parametric.iter().any(|p| label(p).contains(pat.as_str()))
             || suite.written.iter().any(|x| stem(x.path).contains(pat.as_str()));
         if !known {
             eprintln!("--only {pat} matches nothing. `--list` shows what this suite defines.");
@@ -497,7 +497,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
 
     let mut all_ok = true;
 
-    for p in suite.pairings {
+    for p in suite.parametric {
         let name_of = label(p);
         if let Some(pat) = &o.only {
             if !name_of.contains(pat.as_str()) {
@@ -610,11 +610,11 @@ mod tests {
     }
 
     /// The group size is no longer the suite's business: it follows from `f` in the environment
-    /// space, and is tested there. What is this crate's business is that a pairing can be named,
+    /// space, and is tested there. What is this crate's business is that a parametric scenario can be named,
     /// because that name addresses a run directory and a `--only` selector.
     #[test]
     fn a_pairing_is_named_by_its_coordinates() {
-        let both = Pairing {
+        let both = Parametric {
             environment: "environments/clean.json",
             workload: Some("workloads/mutex.json"),
             seeds: 1,
@@ -623,7 +623,7 @@ mod tests {
 
         // A failure detector has no workload, so its environment names it on its own.
         let alone =
-            Pairing { environment: "environments/crashes.json", workload: None, seeds: 1 };
+            Parametric { environment: "environments/crashes.json", workload: None, seeds: 1 };
         assert_eq!(label(&alone), "crashes");
     }
 
