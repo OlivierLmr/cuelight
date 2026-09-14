@@ -1,6 +1,6 @@
 [package]
 name = "cuelight-suite"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Run a suite of cuelight scenarios and judge the journals: seeds drawn from spaces, scenarios written by hand, and a verdict"
 
