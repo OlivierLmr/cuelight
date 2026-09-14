@@ -94,6 +94,12 @@ pub struct Events {
     pub stimuli: Vec<(u64, String, Value)>,
     pub crashed: HashMap<String, u64>,
     pub end: u64,
+    /// True when the run was cut at the time limit instead of running out of events.
+    ///
+    /// Every liveness deadline dates from the end of the run, so judging a truncated run reports
+    /// "never happened" when the truth is "we stopped looking". Worse, the events scheduled past
+    /// the limit never fire at all: a workload asking for twelve requests may have exercised nine.
+    pub truncated: bool,
 }
 
 /// Where liveness deadlines date from, **never** [`Scenario::gst`].
@@ -125,7 +131,8 @@ pub fn ty(b: &Value) -> &str {
 pub fn load_events(dir: &Path) -> Result<Events, String> {
     let jpath = dir.join("journal.jsonl");
     let f = std::fs::File::open(&jpath).map_err(|e| format!("{}: {e}", jpath.display()))?;
-    let mut ev = Events { observes: vec![], stimuli: vec![], crashed: HashMap::new(), end: 0 };
+    let mut ev =
+        Events { observes: vec![], stimuli: vec![], crashed: HashMap::new(), end: 0, truncated: false };
     for line in BufReader::new(f).lines() {
         let line = line.map_err(|e| e.to_string())?;
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
@@ -140,6 +147,10 @@ pub fn load_events(dir: &Path) -> Result<Events, String> {
             "stimulus" => {
                 let dst = v.get("dest").and_then(Value::as_str).unwrap_or("").to_string();
                 ev.stimuli.push((t, dst, body));
+            }
+            "end" => {
+                ev.truncated =
+                    v.pointer("/detail/reason").and_then(Value::as_str) == Some("time-limit");
             }
             "fault-crash" => {
                 if let Some(n) = v.pointer("/detail/node").and_then(Value::as_str) {
@@ -520,6 +531,11 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
                 Err(e) => fails.push((seed, e)),
                 Ok(()) => match load_events(&dir) {
                     Err(e) => fails.push((seed, e)),
+                    Ok(ev) if ev.truncated => fails.push((
+                        seed,
+                        "run cut at the time limit; its tail never happened, so nothing was judged"
+                            .into(),
+                    )),
                     Ok(ev) => {
                         let mut r = Report::default();
                         (suite.check)(&ev, &sc, &mut r);
@@ -570,6 +586,10 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
             Err(e) => { println!("  did not run: {e}"); all_ok = false }
             Ok(()) => match load_events(&dir) {
                 Err(e) => { println!("  {e}"); all_ok = false }
+                Ok(ev) if ev.truncated => {
+                    println!("  cut at the time limit; its tail never happened, so nothing judged");
+                    all_ok = false
+                }
                 Ok(ev) => {
                     let mut r = Report::default();
                     (suite.check)(&ev, &sc, &mut r);
