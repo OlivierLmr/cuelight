@@ -138,25 +138,17 @@ fn a_skeleton_nobody_has_filled_in_fails_without_blaming_determinism() {
     assert!(text.contains("FAILED"), "{text}");
 }
 
-/// A run cut at the time limit is not a run that finished. Its tail never happened, so every
-/// liveness verdict would read "never" where the truth is "we stopped looking", and the events
-/// scheduled past the limit were never delivered at all.
+/// A run that ends at the time limit is normal: an algorithm driven by timers, a failure detector
+/// above all, keeps going until something stops it. It must still be judged.
 #[test]
-fn a_run_cut_at_the_limit_is_not_judged() {
+fn a_run_that_reaches_the_limit_is_still_judged() {
     if !have_python() {
         return;
     }
-    let (ok, text) = demo_run("busy", "busy.py", &[]);
-    assert!(!ok, "{text}");
-    assert!(text.contains("cut at the time limit"), "{text}");
-    // Not one drawn seed may be judged: each is reported as cut, never as a property that failed.
+    let (_, text) = demo_run("busy", "busy.py", &[]);
     assert!(text.contains("quiet: 0/4 seeds passed"), "{text}");
-    let judged = text
-        .lines()
-        .filter(|l| l.trim_start().starts_with("seed "))
-        .filter(|l| !l.contains("cut at the time limit"))
-        .count();
-    assert_eq!(judged, 0, "a truncated seed was judged on its properties: {text}");
+    // Judged on its property, not dismissed for having reached the limit.
+    assert!(text.contains("every-poke-answered"), "{text}");
 }
 
 #[test]
