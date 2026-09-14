@@ -123,6 +123,21 @@ fn a_node_that_does_not_replay_stops_the_suite_before_any_verdict() {
     assert!(text.contains("pokes-quiet seed 1"), "it replayed the wrong case: {text}");
 }
 
+/// The first thing anyone sees, and it used to name the wrong thing: an unfilled skeleton dies on
+/// its first event, which is not a replay failure. Calling it one sends a newcomer hunting for a
+/// clock they never used.
+#[test]
+fn a_skeleton_nobody_has_filled_in_fails_without_blaming_determinism() {
+    if !have_python() {
+        return;
+    }
+    let (ok, text) = demo_run("unwritten", "unwritten.py", &[]);
+    assert!(!ok, "{text}");
+    assert!(text.contains("exited on its own"), "{text}");
+    assert!(!text.contains("NOT DETERMINISTIC"), "a dead node is not a clock read: {text}");
+    assert!(text.contains("FAILED"), "{text}");
+}
+
 #[test]
 fn only_runs_what_it_names_and_refuses_what_it_does_not() {
     if !have_python() {
