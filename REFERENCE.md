@@ -140,7 +140,7 @@ Uniform instants reach "do the thing, then immediately do it again" rarely, and 
 class of bugs. It may only refer backwards, which is what makes a cycle impossible.
 
 There is no absolute `at`: the time limit lives in the environment, so an absolute instant would
-mean something different in each pairing it is used in.
+mean something different in each parametric scenario it is used in.
 
 ### What a seed means
 
@@ -196,9 +196,9 @@ A binary built on `cuelight-suite` parses these for you, identically whatever it
 | `--bin <cmd...>` | command launching one node. **Must be last** |
 | `--suite-dir <path>` | where this suite's `scenarios/`, `environments/` and `workloads/` live |
 | `--out <dir>` | run directory (`store/<suite>`) |
-| `--seeds <n>` | override every pairing's seed count |
+| `--seeds <n>` | override every parametric scenario's seed count |
 | `--seed <a>[..<b>]` | one seed, or an inclusive range, instead of every seed |
-| `--only <name>` | run only what matches: a pairing's name, or a written scenario's |
+| `--only <name>` | run only what matches: a parametric scenario's name, or a written scenario's |
 | `--watchdog <ms>` | wall-clock hang detector (5000) |
 | `--list` | show what this suite declares, then exit |
 

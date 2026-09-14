@@ -1,21 +1,21 @@
 //! A suite over fixture nodes, so the machinery in this crate is exercised end to end.
 //!
-//! It stands in for a real caller: two pairings, one written scenario that is expected to fail,
+//! It stands in for a real caller: two parametric, one written scenario that is expected to fail,
 //! and one property. `tests/suite.rs` runs this binary against nodes that behave differently, and
 //! reads what it prints.
 
-use cuelight_suite::{Events, Kind, Pairing, Report, Scenario, Suite, Written};
+use cuelight_suite::{Events, Kind, Parametric, Report, Scenario, Suite, Written};
 use std::process::ExitCode;
 
-static PAIRINGS: &[Pairing] = &[
+static PARAMETRIC: &[Parametric] = &[
     // A workload, and an environment quiet enough that every poke must be answered.
-    Pairing {
+    Parametric {
         environment: "testdata/quiet.json",
         workload: Some("testdata/pokes.json"),
         seeds: 4,
     },
     // No workload at all: the faults are the whole of it, as for a failure detector.
-    Pairing { environment: "testdata/crashes.json", workload: None, seeds: 4 },
+    Parametric { environment: "testdata/crashes.json", workload: None, seeds: 4 },
 ];
 
 static WRITTEN: &[Written] = &[Written {
@@ -37,7 +37,7 @@ fn check(ev: &Events, sc: &Scenario, r: &mut Report) {
 
 fn main() -> ExitCode {
     cuelight_suite::run(
-        Suite { name: "demo", pairings: PAIRINGS, written: WRITTEN, check },
+        Suite { name: "demo", parametric: PARAMETRIC, written: WRITTEN, check },
         env!("CARGO_MANIFEST_DIR"),
     )
 }

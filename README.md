@@ -46,10 +46,10 @@ the failures is a different job, and `cuelight-suite` does it without ever learn
 properties are: you hand it a `Suite` and a function, and it calls the function.
 
 ```rust
-use cuelight_suite::{Events, Kind, Pairing, Report, Scenario, Suite};
+use cuelight_suite::{Events, Kind, Parametric, Report, Scenario, Suite};
 use std::process::ExitCode;
 
-static PAIRINGS: &[Pairing] = &[Pairing {
+static PARAMETRIC: &[Parametric] = &[Parametric {
     environment: "environments/steady.json",
     workload: Some("workloads/steady.json"),
     seeds: 200,
@@ -61,14 +61,14 @@ fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
 
 fn main() -> ExitCode {
     cuelight_suite::run(
-        Suite { name: "mine", pairings: PAIRINGS, written: &[], check },
+        Suite { name: "mine", parametric: PARAMETRIC, written: &[], check },
         env!("CARGO_MANIFEST_DIR"),
     )
 }
 ```
 
 That binary replays one case before judging anything, and stops if your node does not reproduce it.
-Then it draws every pairing over its seeds, deletes the seeds that passed, and prints under each
+Then it draws every parametric scenario over its seeds, deletes the seeds that passed, and prints under each
 failure the command that runs it again, the journal, and a sequence diagram.
 
 ## Your side of the contract
