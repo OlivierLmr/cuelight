@@ -3,7 +3,7 @@ members = ["cuelight-suite"]
 
 [package]
 name = "cuelight"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Deterministic discrete-event simulator for distributed systems: the network, the clock and the faults"
 

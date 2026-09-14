@@ -1,8 +1,8 @@
 [package]
 name = "cuelight-suite"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Run a suite of cuelight scenarios and judge the journals: campaigns over seeds, directed tests, and a verdict"
+description = "Run a suite of cuelight scenarios and judge the journals: seeds drawn from spaces, scenarios written by hand, and a verdict"
 
 [dependencies]
 cuelight = { path = ".." }
