@@ -46,11 +46,13 @@ the failures is a different job, and `cuelight-suite` does it without ever learn
 properties are: you hand it a `Suite` and a function, and it calls the function.
 
 ```rust
-use cuelight_suite::{Campaign, Events, Kind, Report, Scenario, Suite};
+use cuelight_suite::{Events, Kind, Pairing, Report, Scenario, Suite};
 use std::process::ExitCode;
 
-static CAMPAIGNS: &[Campaign] = &[Campaign {
-    label: "steady", stimuli: "stimuli/steady.json", fifo: true, faults: true, seeds: 200,
+static PAIRINGS: &[Pairing] = &[Pairing {
+    environment: "environments/steady.json",
+    workload: Some("workloads/steady.json"),
+    seeds: 200,
 }];
 
 fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
@@ -59,15 +61,15 @@ fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
 
 fn main() -> ExitCode {
     cuelight_suite::run(
-        Suite { name: "mine", campaigns: CAMPAIGNS, directed: &[], check },
+        Suite { name: "mine", pairings: PAIRINGS, written: &[], check },
         env!("CARGO_MANIFEST_DIR"),
     )
 }
 ```
 
 That binary replays one case before judging anything, and stops if your node does not reproduce it.
-Then it runs every campaign, deletes the seeds that passed, and prints under each failure the
-command that runs it again, the journal, and a sequence diagram.
+Then it draws every pairing over its seeds, deletes the seeds that passed, and prints under each
+failure the command that runs it again, the journal, and a sequence diagram.
 
 ## Your side of the contract
 
@@ -87,7 +89,7 @@ node around the ring, which pongs back, five rounds. Forty lines, touching handl
 `send`, `set_timer` with a callback and `observe`.
 
 ```sh
-cuelight run --seed 1 --no-faults --bin python3 templates/python/example/pingpong.py
+cuelight run --seed 1 --bin python3 templates/python/example/pingpong.py
 ```
 
 The five rounds land in `store/latest/journal.jsonl`. The first three, times included:
