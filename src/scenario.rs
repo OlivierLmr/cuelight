@@ -155,6 +155,7 @@ pub struct Scenario {
     pub stimuli: Vec<Stimulus>,
 }
 
+#[derive(Clone)]
 pub struct ExpandOpts {
     pub nodes: usize,
     pub f: usize,

@@ -14,7 +14,8 @@
 //! use std::process::ExitCode;
 //!
 //! static CAMPAIGNS: &[Campaign] = &[Campaign {
-//!     label: "steady", stimuli: "stimuli/steady.json", fifo: true, faults: true, seeds: 200,
+//!     label: "steady", stimuli: "stimuli/steady.json", fifo: true, faults: true,
+//!     nodes: &[4, 7, 10], seeds: 200,
 //! }];
 //!
 //! fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
@@ -164,6 +165,12 @@ pub struct Campaign {
     pub fifo: bool,
     /// False expands a clean run, the right setting for an algorithm that assumes no failures.
     pub faults: bool,
+    /// Node counts to sweep, one picked per seed. `&[4]` pins the run to four, as before.
+    ///
+    /// A suite that declares more than one is checking that its algorithms read the group size
+    /// from `init` rather than assuming it. `f` follows from `n = 3f+1`, so a size of 4, 7 or 10
+    /// tolerates 1, 2 or 3 crashes; a size that leaves `f = 0` would quietly stop injecting any.
+    pub nodes: &'static [usize],
     pub seeds: u64,
 }
 
@@ -277,6 +284,15 @@ fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, 
 }
 
 /// How a campaign's seeds expand: its own switches, and its stimulus template read from disk.
+/// The size this seed runs at, and the failures that size tolerates.
+///
+/// Picked from the seed rather than drawn, so a failure replays at the size it failed at: the
+/// scenario written beside the journal records it, and the replay command reproduces it.
+fn size_for(c: &Campaign, seed: u64) -> (usize, usize) {
+    let n = if c.nodes.is_empty() { 4 } else { c.nodes[(seed as usize) % c.nodes.len()] };
+    (n, (n - 1) / 3)
+}
+
 fn expand_opts(o: &Opts, c: &Campaign) -> Result<ExpandOpts, String> {
     let stimuli = if c.stimuli.is_empty() {
         None
@@ -453,7 +469,8 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         let mut fails: Vec<(u64, String)> = vec![];
         for seed in lo..=hi {
             let dir = o.out.join(c.label).join(seed.to_string());
-            let sc = Scenario::expand(seed, &opts);
+            let (nodes, f) = size_for(c, seed);
+            let sc = Scenario::expand(seed, &ExpandOpts { nodes, f, ..opts.clone() });
             match run_once(&o, &dir, sc.clone()) {
                 Err(e) => fails.push((seed, e)),
                 Ok(()) => match load_events(&dir) {
@@ -543,6 +560,37 @@ mod tests {
 
     fn sc(json: &str) -> Scenario {
         Scenario::from_json(json).expect("scenario")
+    }
+
+    fn camp(nodes: &'static [usize]) -> Campaign {
+        Campaign { label: "c", stimuli: "", fifo: true, faults: true, nodes, seeds: 1 }
+    }
+
+    #[test]
+    fn one_size_pins_every_seed_to_it() {
+        let c = camp(&[4]);
+        assert!((0..10).all(|s| size_for(&c, s) == (4, 1)));
+    }
+
+    #[test]
+    fn several_sizes_cycle_with_the_seed() {
+        let c = camp(&[4, 7, 10]);
+        let got: Vec<usize> = (0..7).map(|s| size_for(&c, s).0).collect();
+        assert_eq!(got, vec![4, 7, 10, 4, 7, 10, 4]);
+    }
+
+    #[test]
+    fn failures_follow_from_the_size() {
+        let c = camp(&[4, 7, 10]);
+        assert_eq!(
+            (0..3).map(|s| size_for(&c, s)).collect::<Vec<_>>(),
+            vec![(4, 1), (7, 2), (10, 3)]
+        );
+    }
+
+    #[test]
+    fn no_size_declared_means_four() {
+        assert_eq!(size_for(&camp(&[]), 7), (4, 1));
     }
 
     #[test]
