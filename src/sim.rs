@@ -31,6 +31,10 @@ pub struct Outcome {
 
 #[derive(Debug, Clone)]
 enum Ev {
+    /// A message leaving its sender. Separate from `Deliver` because a process does not hand every
+    /// message to the network at once: it gets them out one after another, and a crash inside that
+    /// loop stops the rest from ever leaving.
+    Emit { from: usize, env: Envelope },
     Deliver { from: usize, env: Envelope },
     Timer { node: usize, timer_id: u64 },
     Fault(usize),
@@ -78,6 +82,8 @@ pub struct Sim {
     partition_side: Vec<bool>,
     link_count: HashMap<(usize, usize), u64>,
     last_sched: HashMap<(usize, usize), u64>,
+    /// How many steps each node has taken, for the emit stagger.
+    steps: HashMap<usize, u64>,
 }
 
 impl Sim {
@@ -111,6 +117,7 @@ impl Sim {
             partition_side: vec![false; n],
             link_count: HashMap::new(),
             last_sched: HashMap::new(),
+            steps: HashMap::new(),
             cfg,
         })
     }
@@ -150,6 +157,13 @@ impl Sim {
             Err(e) => return Err(e.to_string()),
         };
 
+        // One step of this node, for the emit stagger below. Counted per node so that what one
+        // node does cannot shift another's timings.
+        let step = self.steps.entry(idx).or_insert(0);
+        *step += 1;
+        let step = *step;
+        let mut rank = 0u64;
+
         for env in outputs {
             if env.dest == HARNESS {
                 self.handle_harness_message(idx, env);
@@ -159,24 +173,10 @@ impl Sim {
                 self.journal.note(self.now, "unknown-destination", json!({ "dest": env.dest }));
                 continue;
             };
-            self.journal.record(self.now, "send", &env);
-
-            let link = (idx, to);
-            let n = self.link_count.entry(link).or_insert(0);
-            *n += 1;
-            let msg_idx = *n;
-            let mut at = self.now + self.cfg.scenario.delay(idx, to, msg_idx, self.now);
-
-            // Per-link FIFO: Lamport's mutex needs it, Ricart-Agrawala does not. Turning it off is
-            // a deliberate exercise: a correct Lamport implementation breaks without it.
-            if self.cfg.scenario.fifo {
-                let prev = *self.last_sched.get(&link).unwrap_or(&0);
-                if at <= prev {
-                    at = prev + 1;
-                }
-                self.last_sched.insert(link, at);
-            }
-            self.schedule(at, Ev::Deliver { from: idx, env });
+            let _ = to;
+            let out_at = self.now + self.cfg.scenario.emit_at(idx, step, rank);
+            rank += 1;
+            self.schedule(out_at, Ev::Emit { from: idx, env });
         }
         Ok(())
     }
@@ -306,27 +306,47 @@ impl Sim {
                     self.step_node(idx, env)?;
                 }
 
-                Ev::Deliver { from, env } => {
-                    let Some(&to) = self.index.get(&env.dest) else { continue };
-
-                    // A crash loses the sender's still-undelivered messages.
-                    //
-                    // Without this the harness cannot express a partial broadcast, because a
-                    // node's step is atomic: it emits every send at once and they are all
-                    // scheduled, so a later crash cannot stop any of them arriving. A real
-                    // process crashing inside its send loop never hands the later messages to the
-                    // network. Since delays bound how long a message is in flight, dropping
-                    // undelivered messages from a dead sender drops exactly those from the window
-                    // before the crash, which is the partial broadcast reliable broadcast exists
-                    // to repair. Verified: without it, best-effort broadcast passes 60/60 seeds.
+                // The moment a message actually leaves its sender. A process that has died by now
+                // never got this one out, which is what leaves a broadcast half-delivered — the
+                // very thing reliable broadcast exists to repair.
+                Ev::Emit { from, env } => {
                     if !self.nodes[from].alive {
                         self.journal.note(
                             self.now,
-                            "drop-from-crashed",
+                            "never-sent",
                             json!({ "src": env.src, "dest": env.dest }),
                         );
                         continue;
                     }
+                    let Some(&to) = self.index.get(&env.dest) else { continue };
+                    self.journal.record(self.now, "send", &env);
+
+                    let link = (from, to);
+                    let n = self.link_count.entry(link).or_insert(0);
+                    *n += 1;
+                    let msg_idx = *n;
+                    let mut at = self.now + self.cfg.scenario.delay(from, to, msg_idx, self.now);
+
+                    // Per-link FIFO: Lamport's mutex needs it, Ricart-Agrawala does not. Turning it
+                    // off is a deliberate exercise: a correct Lamport implementation breaks
+                    // without it.
+                    if self.cfg.scenario.fifo {
+                        let prev = *self.last_sched.get(&link).unwrap_or(&0);
+                        if at <= prev {
+                            at = prev + 1;
+                        }
+                        self.last_sched.insert(link, at);
+                    }
+                    self.schedule(at, Ev::Deliver { from, env });
+                }
+
+                Ev::Deliver { from, env } => {
+                    let Some(&to) = self.index.get(&env.dest) else { continue };
+
+                    // A message that left before its sender died still arrives. Nothing unsends a
+                    // packet, and a crash partway through a send loop is modelled where it happens,
+                    // in that loop, by the emit stagger.
+                    let _ = from;
 
                     // Held, not dropped: a partition that heals still delivers.
                     if self.split_by_partition(from, to) {

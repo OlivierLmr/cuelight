@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 ///
 /// Part of a scenario's fingerprint, so a stored run can say it came from a draw that no longer
 /// exists rather than quietly meaning something else.
-pub const DRAW_VERSION: u32 = 2;
+pub const DRAW_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------- spans
 
@@ -180,6 +180,7 @@ fn s_gst_frac() -> Span<f64> { Span::Range(0.10, 0.33) }
 fn s_pre() -> Span<u64> { Span::Range(1, 400) }
 fn s_post() -> Span<u64> { Span::Range(1, 25) }
 fn s_jitter() -> Span<u64> { Span::Pinned(100) }
+fn s_emit() -> Span<u64> { Span::Range(1, 12) }
 fn s_fifo() -> Span<bool> { Span::Pinned(false) }
 
 /// The set of scenarios a seed draws from: the world a run happens in, and a tree of events.
@@ -204,6 +205,13 @@ pub struct Space {
     pub link_delay_post: Span<u64>,
     #[serde(default = "s_jitter")]
     pub jitter_pct: Span<u64>,
+    /// How long a process takes between two of its own sends.
+    ///
+    /// A node's step is atomic: it emits every send at once. Without this they all leave at the
+    /// same instant, nothing can happen between them, and the very case reliable broadcast exists
+    /// to repair — a sender that dies partway through its send loop — cannot occur at all.
+    #[serde(default = "s_emit")]
+    pub emit_gap: Span<u64>,
     #[serde(default = "s_fifo")]
     pub fifo: Span<bool>,
     #[serde(default)]
@@ -415,6 +423,9 @@ pub struct Scenario {
     /// can never reorder them, which would silently make `fifo` a no-op.
     #[serde(default = "d_jitter")]
     pub jitter_pct: u64,
+    /// Longest gap between two sends of one process; see [`Space::emit_gap`].
+    #[serde(default)]
+    pub emit_gap: u64,
     #[serde(default)]
     pub faults: Vec<Fault>,
     #[serde(default)]
@@ -453,6 +464,7 @@ impl Scenario {
         }
 
         let jitter_pct = space.jitter_pct.draw(&mut r);
+        let emit_gap = space.emit_gap.draw(&mut r);
         let fifo = space.fifo.draw(&mut r);
 
         let mut d = Draw { r: &mut r, f, n, names: &names, time_limit, faults: vec![], stimuli: vec![] };
@@ -475,6 +487,7 @@ impl Scenario {
             delay_pre,
             delay_post,
             jitter_pct,
+            emit_gap,
             faults,
             stimuli,
         }
@@ -611,6 +624,31 @@ impl Scenario {
     ///
     /// Jitter is hashed from `(from, to, idx)` rather than drawn from the run's PRNG, so code under
     /// test changing how many messages it sends does not shift every other link's timing.
+    /// How long after its step a process gets its `rank`-th send out.
+    ///
+    /// Hashed from `(from, step, rank)` rather than drawn from the run's PRNG, for the same reason
+    /// as the jitter below: code under test that changes how many messages it sends must not shift
+    /// every other timing in the run.
+    pub fn emit_at(&self, from: usize, step: u64, rank: u64) -> u64 {
+        if self.emit_gap == 0 || rank == 0 {
+            return 0;
+        }
+        // The sum of the gaps before it, not `rank` times its own: a send loop is sequential, so
+        // the k-th send cannot leave before the (k-1)-th, and only a running total guarantees that.
+        (1..=rank)
+            .map(|i| {
+                let mut h = (from as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .wrapping_add(step.wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
+                    .wrapping_add(i.wrapping_mul(0x1656_67B1_9E37_79F9));
+                h ^= h >> 29;
+                h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                h ^= h >> 32;
+                h % (self.emit_gap + 1)
+            })
+            .sum()
+    }
+
     pub fn delay(&self, from: usize, to: usize, idx: u64, now: u64) -> u64 {
         let (matrix, fallback) = if now < self.gst {
             (&self.delay_pre, self.delay_pre_default)
@@ -697,12 +735,10 @@ mod tests {
         let sc = Scenario::draw(3, &sp);
         assert_eq!((sc.nodes, sc.f), (4, 1));
         assert_eq!(sc.gst, 2855);
+        assert_eq!(sc.emit_gap, 6);
         assert_eq!(sc.delay_pre[0], vec![0, 362, 48, 136]);
-        assert_eq!(sc.faults.len(), 1);
-        match &sc.faults[0] {
-            Fault::Crash { at, node } => assert_eq!((*at, node.as_str()), (496, "n0")),
-            other => panic!("expected a crash, got {other:?}"),
-        }
+        // This seed draws zero crashes from `[0, f]`.
+        assert!(sc.faults.is_empty(), "{:?}", sc.faults);
     }
 
     // ------------------------------------------------------------ the subject
@@ -824,6 +860,58 @@ mod tests {
     }
 
     // -------------------------------------------------------------- the world
+
+    // --------------------------------------------------- getting messages out
+
+    /// A process does not hand every message to the network at once, and that matters: a crash
+    /// inside a send loop is what leaves a broadcast half-delivered, which is the whole reason
+    /// reliable broadcast exists.
+    #[test]
+    fn sends_leave_one_after_another() {
+        let sc = Scenario::draw(1, &space(r#"{"f": 2, "emit_gap": [4, 4]}"#));
+        assert_eq!(sc.emit_gap, 4);
+        let out: Vec<u64> = (0..6).map(|rank| sc.emit_at(0, 1, rank)).collect();
+        assert_eq!(out[0], 0, "the first send leaves at once");
+        assert!(out.windows(2).all(|w| w[0] <= w[1]), "not cumulative: {out:?}");
+        assert!(*out.last().unwrap() > 0, "every send left together: {out:?}");
+    }
+
+    #[test]
+    fn a_pinned_gap_of_zero_puts_every_send_at_the_same_instant() {
+        // Which is what the simulator did before this existed, and why a partial broadcast could
+        // not be expressed at all.
+        let sc = Scenario::draw(1, &space(r#"{"f": 1, "emit_gap": 0}"#));
+        assert!((0..8).all(|r| sc.emit_at(0, 1, r) == 0));
+    }
+
+    /// Hashed, not drawn: code under test that sends a different number of messages must not shift
+    /// every other timing in the run. The same rule the jitter follows.
+    #[test]
+    fn the_stagger_does_not_consume_the_run_s_randomness() {
+        let sc = Scenario::draw(4, &space(r#"{"f": 2, "emit_gap": [1, 9]}"#));
+        // Same inputs, same answer, however often it is asked.
+        for _ in 0..3 {
+            assert_eq!(sc.emit_at(1, 7, 3), sc.emit_at(1, 7, 3));
+        }
+        // And a different step of the same node is independent, so a node that takes one step more
+        // does not move what its neighbours do.
+        let a: Vec<u64> = (0..5).map(|r| sc.emit_at(1, 7, r)).collect();
+        let b: Vec<u64> = (0..5).map(|r| sc.emit_at(1, 8, r)).collect();
+        assert_ne!(a, b, "two steps staggered identically: {a:?}");
+    }
+
+    #[test]
+    fn every_stagger_stays_within_the_declared_gap() {
+        let sc = Scenario::draw(9, &space(r#"{"f": 3, "emit_gap": [0, 7]}"#));
+        for node in 0..4 {
+            for step in 1..6 {
+                for rank in 1..8u64 {
+                    let d = sc.emit_at(node, step, rank);
+                    assert!(d <= rank * sc.emit_gap, "rank {rank} waited {d} for gap {}", sc.emit_gap);
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_scalar_and_a_range_of_width_zero_are_the_same_run() {

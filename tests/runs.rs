@@ -132,17 +132,23 @@ fn a_node_that_exits_on_its_own_fails_the_run() {
 }
 
 /// Crashes land at the instant the scenario names, and a crashed sender's in-flight messages are
-/// dropped, which is what makes a *partial* broadcast expressible at all.
+/// A crash lands when the scenario says, and stops the sends its victim had not got out yet.
+///
+/// A process does not hand every message to the network at once. Dying inside that loop is what
+/// leaves a broadcast half-delivered, which is the whole reason reliable broadcast exists. What a
+/// crash must *not* do is unsend: a message already gone still arrives, however slow the link.
 #[test]
-fn a_crash_lands_on_time_and_drops_what_was_in_flight() {
+fn a_crash_stops_the_sends_its_victim_had_not_made_yet() {
     if !have_python() {
         return;
     }
     let scenario = std::env::temp_dir().join("cuelight-test-crash.json");
+    // A wide emit gap and a crash a few ticks in, so the victim gets some of its sends out and not
+    // the rest. Links are slow, so whatever did leave is still in flight when it dies.
     std::fs::write(
         &scenario,
         r#"{"nodes": 4, "gst": 0, "delay_pre_default": 500, "delay_post_default": 500,
-            "faults": [{"kind": "crash", "at": 100, "node": "n0"}]}"#,
+            "emit_gap": 40, "faults": [{"kind": "crash", "at": 30, "node": "n0"}]}"#,
     )
     .unwrap();
     let out = tmp("crash");
@@ -158,20 +164,23 @@ fn a_crash_lands_on_time_and_drops_what_was_in_flight() {
         .output()
         .unwrap();
     assert!(o.status.success());
-    let lines: Vec<serde_json::Value> = journal(&out)
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let crash = lines
-        .iter()
-        .find(|v| v["kind"] == "fault-crash")
-        .expect("no fault-crash entry");
-    assert_eq!(crash["t"], 100, "the crash did not land at the stated instant");
+    let lines: Vec<serde_json::Value> =
+        journal(&out).lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+
+    let crash = lines.iter().find(|v| v["kind"] == "fault-crash").expect("no fault-crash entry");
+    assert_eq!(crash["t"], 30, "the crash did not land at the stated instant");
     assert_eq!(crash["detail"]["node"], "n0");
+
     assert!(
-        lines.iter().any(|v| v["kind"] == "drop-from-crashed"),
-        "n0 died mid-flight with 500-unit links and nothing was dropped"
+        lines.iter().any(|v| v["kind"] == "never-sent" && v["detail"]["src"] == "n0"),
+        "n0 died partway through its send loop and every message still left"
     );
+    // And the ones that did leave were not unsent: each was delivered, 500 ticks later, long after
+    // the crash.
+    let sent = lines.iter().filter(|v| v["kind"] == "send" && v["src"] == "n0").count();
+    let landed = lines.iter().filter(|v| v["kind"] == "recv" && v["src"] == "n0").count();
+    assert!(sent > 0, "n0 got nothing out at all");
+    assert_eq!(landed, sent, "{sent} left n0 before it died, {landed} arrived");
 }
 
 /// The journal is a contract: dense `seq` from 0, non-decreasing `t`, `end` last, `done` absent.
