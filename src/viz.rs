@@ -241,10 +241,10 @@ mod tests {
     #[test]
     fn a_stimulus_is_a_note_on_the_node_it_was_asked_of() {
         let d = draw("stimulus", &[
-            r#"{"t":10,"kind":"stimulus","src":"harness","dest":"n0","body":{"type":"do_broadcast"}}"#,
+            r#"{"t":10,"kind":"stimulus","src":"harness","dest":"n0","body":{"type":"shout"}}"#,
         ]);
         assert!(!d.contains("participant harness"), "the harness is not a process: {d}");
-        assert!(d.contains(&format!("{ASKED}\n        Note over n0: asked do_broadcast @10")), "{d}");
+        assert!(d.contains(&format!("{ASKED}\n        Note over n0: asked shout @10")), "{d}");
     }
 
     /// Every process of the run, even one that never sends or receives. An empty lifeline is
