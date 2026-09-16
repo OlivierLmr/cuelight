@@ -63,7 +63,7 @@ into a bug report.
 ```json
 {
   "drawn": {"seed": 7, "space": "spaces/crashes.json", "fingerprint": "30a18569c5cd0c51"},
-  "nodes": 3, "f": 1, "gst": 2678, "time_limit": 10000, "fifo": true,
+  "nodes": 3, "f": 1, "gst": 2678, "time_limit": 10000, "fifo": true, "emit_gap": 6,
   "delay_pre":  [[0,341,205],[194,0,255],[137,214,0]],
   "delay_post": [[0,16,2],[7,0,18],[3,5,0]],
   "jitter_pct": 100,
@@ -102,7 +102,7 @@ draws after it.
 ```json
 { "f": [1, 3], "time_limit": 10000, "gst_frac": [0.10, 0.33],
   "link_delay_pre": [1, 400], "link_delay_post": [1, 25],
-  "jitter_pct": 100, "fifo": true,
+  "jitter_pct": 100, "emit_gap": [1, 12], "fifo": true,
   "events": [
     { "nodes": { "distinct": 1 }, "at_frac": [0.0, 0.5],
       "stimulus": { "type": "ping", "id": "m<i>" },
@@ -115,6 +115,13 @@ one crashes shortly after*. The crash inherits its parent's process, which is wh
 no variables.
 
 `f` is the fault budget and the group size follows it, `n = 3f + 1`, so `[1, 3]` sweeps 4, 7 and 10.
+
+`emit_gap` is how long a process takes between two of its own sends. A step is atomic — a node
+handles one event and emits everything it has to say — so without a gap every message leaves at the
+same instant, nothing can happen between them, and a sender that dies partway through its send loop
+cannot occur. With one, a crash between two sends stops the rest from ever leaving, which is exactly
+the half-delivered broadcast a reliable layer repairs. A message that *did* leave arrives however
+slow the link: nothing unsends a packet.
 
 **Who an event acts on**, and how many copies of it there are:
 
