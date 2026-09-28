@@ -14,11 +14,18 @@ pub struct Envelope {
     pub src: String,
     pub dest: String,
     pub body: Value,
+    /// The harness's own name for this message, assigned when it leaves its sender.
+    ///
+    /// `skip`ped in both directions on purpose: the wire protocol is `{src, dest, body}` and a
+    /// node has no business seeing this. It exists so the journal can say which `recv` belongs to
+    /// which `send` — which a reader cannot work out for itself once a link is allowed to reorder.
+    #[serde(skip)]
+    pub mid: Option<u64>,
 }
 
 impl Envelope {
     pub fn new(src: &str, dest: &str, body: Value) -> Self {
-        Envelope { src: src.into(), dest: dest.into(), body }
+        Envelope { src: src.into(), dest: dest.into(), body, mid: None }
     }
 
     /// The `type` discriminator, or `""` if absent or not a string.

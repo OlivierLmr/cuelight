@@ -39,8 +39,12 @@ impl Journal {
     }
 
     /// One line per event. `seq` is the harness's own ordering, independent of scheduling.
+    ///
+    /// A message-shaped entry carries `mid` when the envelope has one, which is every entry that
+    /// describes a message between two nodes. Entries the harness raises itself — `init`,
+    /// `stimulus`, `timer` — have none, and the key is simply absent rather than null.
     pub fn record(&mut self, time: u64, kind: &str, env: &Envelope) {
-        let line = serde_json::json!({
+        let mut line = serde_json::json!({
             "seq":  self.count,
             "t":    time,
             "kind": kind,
@@ -48,6 +52,9 @@ impl Journal {
             "dest": env.dest,
             "body": canonical(&env.body),
         });
+        if let (Some(mid), Some(obj)) = (env.mid, line.as_object_mut()) {
+            obj.insert("mid".into(), serde_json::json!(mid));
+        }
         let _ = writeln!(self.out, "{line}");
         self.count += 1;
     }

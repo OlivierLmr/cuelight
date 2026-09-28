@@ -38,29 +38,26 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
     let entries: Vec<Value> =
         text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect();
 
-    // What a message spent in flight. Matched oldest-first per link, which is what FIFO means.
-    let mut pending: std::collections::HashMap<(String, String), Vec<usize>> = Default::default();
     // When each delivered message was posted. A mermaid arrow is horizontal, so it cannot slant to
     // show flight time; the label carries both instants instead, and a slow link becomes visible.
+    //
+    // Paired on `mid`, the name the harness gives a message when it leaves its sender. This used to
+    // match oldest-first per link, which is exactly right when the link is FIFO and wrong
+    // otherwise — and `fifo` is a scenario field meant to be turned off, with jitter on by default,
+    // so reordering genuinely happens. A mispairing put the wrong two instants on a label.
+    let mut sent_at: std::collections::HashMap<u64, u64> = Default::default();
     let mut posted: std::collections::HashMap<usize, u64> = Default::default();
     for (i, v) in entries.iter().enumerate() {
-        let get = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
-        match v.get("kind").and_then(Value::as_str).unwrap_or("") {
-            "send" => {
-                if let (Some(s), Some(d)) = (get("src"), get("dest")) {
-                    pending.entry((s, d)).or_default().push(i);
+        let mid = v.get("mid").and_then(Value::as_u64);
+        match (v.get("kind").and_then(Value::as_str).unwrap_or(""), mid) {
+            ("send", Some(m)) => {
+                if let Some(t) = v.get("t").and_then(Value::as_u64) {
+                    sent_at.insert(m, t);
                 }
             }
-            "recv" => {
-                if let (Some(s), Some(d)) = (get("src"), get("dest")) {
-                    if let Some(q) = pending.get_mut(&(s, d)) {
-                        if !q.is_empty() {
-                            let j = q.remove(0);
-                            if let Some(t0) = entries[j].get("t").and_then(Value::as_u64) {
-                                posted.insert(i, t0);
-                            }
-                        }
-                    }
+            ("recv", Some(m)) => {
+                if let Some(t0) = sent_at.get(&m) {
+                    posted.insert(i, *t0);
                 }
             }
             _ => {}
@@ -266,10 +263,26 @@ mod tests {
     #[test]
     fn a_message_carries_when_it_left_and_when_it_landed() {
         let d = draw("flight", &[
-            r#"{"t":10,"kind":"send","src":"n0","dest":"n1","body":{"type":"rb"}}"#,
-            r#"{"t":80,"kind":"recv","src":"n0","dest":"n1","body":{"type":"rb"}}"#,
+            r#"{"t":10,"kind":"send","src":"n0","dest":"n1","mid":1,"body":{"type":"rb"}}"#,
+            r#"{"t":80,"kind":"recv","src":"n0","dest":"n1","mid":1,"body":{"type":"rb"}}"#,
         ]);
         assert!(d.contains("n0->>n1: rb 10 to 80"), "{d}");
+    }
+
+    /// Pairing on `mid` rather than oldest-first per link. The old heuristic was exactly right
+    /// when the link was FIFO and wrong otherwise — and `fifo` is a scenario field meant to be
+    /// turned off. Here the second message overtakes the first, and each label must still carry
+    /// its own two instants.
+    #[test]
+    fn messages_pair_by_name_even_when_the_link_reorders_them() {
+        let d = draw("reorder", &[
+            r#"{"t":10,"kind":"send","src":"n0","dest":"n1","mid":1,"body":{"type":"a"}}"#,
+            r#"{"t":20,"kind":"send","src":"n0","dest":"n1","mid":2,"body":{"type":"b"}}"#,
+            r#"{"t":50,"kind":"recv","src":"n0","dest":"n1","mid":2,"body":{"type":"b"}}"#,
+            r#"{"t":90,"kind":"recv","src":"n0","dest":"n1","mid":1,"body":{"type":"a"}}"#,
+        ]);
+        assert!(d.contains("n0->>n1: b 20 to 50"), "b left at 20 and landed at 50: {d}");
+        assert!(d.contains("n0->>n1: a 10 to 90"), "a left at 10 and landed at 90: {d}");
     }
 
     /// A send its author never made is the interesting half of a crash, and it used to leave no

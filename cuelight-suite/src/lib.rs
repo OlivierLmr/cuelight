@@ -333,13 +333,32 @@ fn load_scenario(path: &Path) -> Result<Scenario, String> {
     Scenario::from_json(&raw)
 }
 
-/// Render the sequence diagram beside the journal.
+/// Render the diagrams beside the journal, in both forms.
 ///
 /// Only for runs worth opening: a sweep deletes the seeds that pass, and rendering hundreds of
 /// diagrams nobody looks at would be waste.
-fn draw(dir: &Path) -> Option<PathBuf> {
-    let out = dir.join("messages.mmd");
-    cuelight::viz::render(&dir.join("journal.jsonl"), &out, 200).ok().map(|_| out)
+///
+/// Both, because they are good at different things and neither is a fallback for the other.
+/// Mermaid renders natively in a GitHub issue or pull request, from a fenced block, with no file
+/// and no build — which is exactly where a failing seed gets discussed. The cuesheet document
+/// draws a message as a segment from the instant it left to the instant it landed, so its slope is
+/// its flight time, which is the thing a horizontal arrow cannot say.
+fn draw(dir: &Path) -> Vec<PathBuf> {
+    let journal = dir.join("journal.jsonl");
+    let mut out = Vec::new();
+
+    let mmd = dir.join("messages.mmd");
+    if cuelight::viz::render(&journal, &mmd, 200).is_ok() {
+        out.push(mmd);
+    }
+
+    let st = dir.join("messages.st");
+    let scenario = dir.join("scenario.json");
+    let sc = scenario.exists().then_some(scenario);
+    if cuelight::cuesheet::render(&journal, sc.as_deref(), &st, 200).is_ok() {
+        out.push(st);
+    }
+    out
 }
 
 /// Where to read what happened. The run directory holds it all, but nobody guesses its path.
@@ -348,8 +367,9 @@ fn where_to_read(dir: &Path) {
     if journal.exists() {
         println!("    journal: {}", journal.display());
     }
-    if let Some(mmd) = draw(dir) {
-        println!("    diagram: {}", mmd.display());
+    for (i, d) in draw(dir).iter().enumerate() {
+        let label = if i == 0 { "diagram" } else { "        " };
+        println!("    {label}: {}", d.display());
     }
 }
 

@@ -1,0 +1,29 @@
+# What the words in a cuelight document are, and how they look.
+#
+# cuelight writes your protocol's own words into the kind slot — it has no vocabulary of its own
+# and must not acquire one. This file is where they become something: which of the two structures,
+# whether they end a process's participation, and what they look like. It is yours to edit.
+#
+#   cuesheet render store/latest/messages.st --style cuesheet.sts --out run.svg
+
+# The two that change how *other* lines are drawn. Everything else is a picture.
+kind point crash kills
+kind point died  kills
+
+# Things that last.
+kind span  paused
+kind span  split
+kind span  set_timer
+
+style diagram stretch=1.2 lane-pitch=170
+
+# A stimulus came from outside; an observation came from the process. cuelight tells them apart by
+# class, because the protocol's word for both may be the same.
+style .stimulus  mark=chevron color=#009e73
+style .observe   mark=dot     color=#0072b2
+
+style crash      mark=cross color=#cc79a7
+style died       mark=cross color=#d55e00 label="exited on its own"
+style paused     fill=#c3c9d3 width=7 radius=3
+style split:network fill=#c3c9d3 opacity=0.25
+style set_timer  fill=#dbdfe6 width=4 radius=2

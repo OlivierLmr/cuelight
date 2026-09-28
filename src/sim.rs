@@ -81,6 +81,9 @@ pub struct Sim {
     partition_until: u64,
     partition_side: Vec<bool>,
     link_count: HashMap<(usize, usize), u64>,
+    /// Dense from 1, in the order messages leave their senders. Deterministic because the event
+    /// queue is, which is what makes it safe to put in a journal that `check` diffs.
+    next_mid: u64,
     last_sched: HashMap<(usize, usize), u64>,
     /// How many steps each node has taken, for the emit stagger.
     steps: HashMap<usize, u64>,
@@ -116,6 +119,7 @@ impl Sim {
             partition_until: 0,
             partition_side: vec![false; n],
             link_count: HashMap::new(),
+            next_mid: 0,
             last_sched: HashMap::new(),
             steps: HashMap::new(),
             cfg,
@@ -310,11 +314,19 @@ impl Sim {
                 // never got this one out, which is what leaves a broadcast half-delivered — the
                 // very thing reliable broadcast exists to repair.
                 Ev::Emit { from, env } => {
+                    // Named here, at the one moment a message exists as a thing rather than as an
+                    // intention, so the name is the same in every entry that mentions it. Assigned
+                    // before the liveness check because one that never left still needs saying
+                    // which one it was.
+                    let mut env = env;
+                    self.next_mid += 1;
+                    env.mid = Some(self.next_mid);
+
                     if !self.nodes[from].alive {
                         self.journal.note(
                             self.now,
                             "never-sent",
-                            json!({ "src": env.src, "dest": env.dest }),
+                            json!({ "src": env.src, "dest": env.dest, "mid": self.next_mid }),
                         );
                         continue;
                     }
@@ -361,10 +373,12 @@ impl Sim {
                         continue;
                     }
                     if !self.nodes[to].alive {
+                        // `src` and `mid` so a reader can say *which* message died here. Without
+                        // them all you know is that something did, which is not enough to draw it.
                         self.journal.note(
                             self.now,
                             "drop-to-crashed",
-                            json!({ "dest": env.dest }),
+                            json!({ "src": env.src, "dest": env.dest, "mid": env.mid }),
                         );
                         continue;
                     }

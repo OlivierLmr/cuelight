@@ -104,6 +104,7 @@ your plumbing is right.
 | | |
 |---|---|
 | [REFERENCE.md](REFERENCE.md) | the wire protocol, the faults, scenarios, spaces, every option |
+| [cuesheet.sts](cuesheet.sts) | what the words in a `--format cuesheet` document are, and how they look |
 | [JOURNAL.md](JOURNAL.md) | the journal format, which is what your checker parses |
 | [templates/](templates/) | the node runtime in four languages, ninety lines each, and the example above |
 
