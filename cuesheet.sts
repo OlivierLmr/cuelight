@@ -10,6 +10,10 @@
 kind point crash kills
 kind point died  kills
 
+# Where the axis stops. Without it a message arriving after the run finished is drawn as though it
+# had arrived, rather than as one still in flight.
+kind point end   kills
+
 # Things that last.
 kind span  paused
 kind span  split
