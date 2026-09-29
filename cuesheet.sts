@@ -23,7 +23,7 @@ style diagram stretch=1.2 lane-pitch=170
 
 # A stimulus came from outside; an observation came from the process. cuelight tells them apart by
 # class, because the protocol's word for both may be the same.
-style .stimulus  mark=chevron color=#009e73
+style .stimulus  mark=arrow   color=#009e73
 style .observe   mark=dot     color=#0072b2
 
 style crash      mark=cross color=#cc79a7
