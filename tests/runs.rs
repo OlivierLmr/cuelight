@@ -37,6 +37,33 @@ fn journal(out: &Path) -> String {
     std::fs::read_to_string(out.join("journal.jsonl")).expect("no journal")
 }
 
+/// Run one written scenario against a fixture. Returns whether cuelight was happy.
+fn run_scenario(out: &Path, scenario: &Path, fixture: &str) -> bool {
+    Command::new(BIN)
+        .args(["run", "--scenario"])
+        .arg(scenario)
+        .arg("--out")
+        .arg(out)
+        .arg("--bin")
+        .arg("python3")
+        .arg(root().join("testdata").join(fixture))
+        .current_dir(root())
+        .output()
+        .expect("cuelight did not start")
+        .status
+        .success()
+}
+
+/// The `mid` of every delivery a fixture observed, in journal order.
+fn deliveries(out: &Path) -> Vec<i64> {
+    journal(out)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["kind"] == "observe" && v["body"]["type"] == "deliver")
+        .filter_map(|v| v["body"]["mid"].as_i64())
+        .collect()
+}
+
 fn tmp(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("cuelight-test-{name}"));
     let _ = std::fs::remove_dir_all(&p);
@@ -83,15 +110,6 @@ fn fifo_orders_a_link_and_its_absence_does_not() {
     if !have_python() {
         return;
     }
-    let deliveries = |out: &Path| -> Vec<i64> {
-        journal(out)
-            .lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|v| v["kind"] == "observe" && v["body"]["type"] == "deliver")
-            .filter_map(|v| v["body"]["mid"].as_i64())
-            .collect()
-    };
-
     let ordered = tmp("fifo-on");
     assert!(run(&ordered, &["--seed", "1", "--space", "testdata/env-fifo-clean.json"], "ordering.py").0);
     let got = deliveries(&ordered);
@@ -105,6 +123,90 @@ fn fifo_orders_a_link_and_its_absence_does_not() {
             && !deliveries(&out).windows(2).all(|w| w[0] < w[1])
     });
     assert!(scrambled, "no seed reordered the link: jitter cannot reorder, so fifo is a no-op");
+}
+
+/// A process hands its messages to the network one at a time, and that queue does not reorder
+/// itself: a step beginning while the burst before it is still draining queues behind it.
+///
+/// The fixture answers a ping that lands in the middle of its own burst, on the same link. The
+/// answer was made last, so it must arrive last. Emitting it at rank 0 of the next step would send
+/// it ahead of the burst — a reply overtaking the request it answers, on a link called FIFO.
+#[test]
+fn a_process_sends_in_the_order_it_made_them() {
+    if !have_python() {
+        return;
+    }
+    let scenario = std::env::temp_dir().join("cuelight-test-cross-step.json");
+    std::fs::write(
+        &scenario,
+        r#"{"nodes": 2, "gst": 0, "fifo": true, "emit_gap": 12, "jitter_pct": 0,
+            "delay_pre_default": 1, "delay_post_default": 1}"#,
+    )
+    .unwrap();
+    let out = tmp("cross-step");
+    assert!(run_scenario(&out, &scenario, "cross-step.py"));
+    let got = deliveries(&out);
+    assert_eq!(got, vec![0, 1, 2, 3, 4, 5, 99], "a later message overtook the burst: {got:?}");
+}
+
+/// Keeping a process's sends in order must not cost the gap its zero.
+///
+/// A pinned `emit_gap: 0` is how a caller asks for a step whose messages all leave together, so
+/// that nothing — a crash above all — can land in the middle of a send loop. Spacing them by a tick
+/// to order them would take that away, and quietly change every scenario that pins it.
+#[test]
+fn a_pinned_gap_of_zero_still_leaves_a_step_at_one_instant() {
+    if !have_python() {
+        return;
+    }
+    let scenario = std::env::temp_dir().join("cuelight-test-gap-zero.json");
+    std::fs::write(
+        &scenario,
+        r#"{"nodes": 2, "gst": 0, "fifo": true, "emit_gap": 0, "jitter_pct": 0,
+            "delay_pre_default": 5, "delay_post_default": 5}"#,
+    )
+    .unwrap();
+    let out = tmp("gap-zero");
+    assert!(run_scenario(&out, &scenario, "cross-step.py"));
+    let burst: Vec<i64> = journal(&out)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["kind"] == "send" && v["src"] == "n0" && v["body"]["i"] != 99)
+        .filter_map(|v| v["t"].as_i64())
+        .collect();
+    assert_eq!(burst.len(), 6, "the fixture's burst is not in the journal: {burst:?}");
+    assert!(burst.windows(2).all(|w| w[0] == w[1]), "a pinned gap of zero staggered a step: {burst:?}");
+}
+
+/// A pause and a partition hold messages; neither shuffles them.
+///
+/// Both put a message back in the queue at the instant the hold lifts, where several of them meet.
+/// Ordering that instant by a fresh draw scrambles a link that the scenario calls FIFO, and a
+/// scrambled link is indistinguishable from an algorithm that got its own bookkeeping wrong.
+#[test]
+fn a_held_message_keeps_its_place_in_the_line() {
+    if !have_python() {
+        return;
+    }
+    for (name, fault) in [
+        ("pause", r#"{"kind": "pause", "at": 50, "node": "n1", "duration": 950}"#),
+        ("partition", r#"{"kind": "partition", "at": 50, "duration": 950, "side": ["n1"]}"#),
+    ] {
+        let scenario = std::env::temp_dir().join(format!("cuelight-test-held-{name}.json"));
+        std::fs::write(
+            &scenario,
+            format!(
+                r#"{{"nodes": 2, "gst": 0, "fifo": true, "emit_gap": 0, "jitter_pct": 0,
+                     "delay_pre_default": 2, "delay_post_default": 2, "faults": [{fault}]}}"#
+            ),
+        )
+        .unwrap();
+        let out = tmp(&format!("held-{name}"));
+        assert!(run_scenario(&out, &scenario, "held-order.py"));
+        let got = deliveries(&out);
+        assert_eq!(got.len(), 6, "the fixture did not deliver its six messages: {got:?}");
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "the {name} shuffled the link: {got:?}");
+    }
 }
 
 /// A node that exits on its own fails the run. The tool knows which crashes it injected, and a

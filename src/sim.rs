@@ -43,6 +43,9 @@ enum Ev {
 
 struct Scheduled {
     time: u64,
+    /// The instant this event first came due. An event a pause or a partition puts back keeps it,
+    /// so it rejoins the instant the hold lifts by when it should have happened.
+    origin: u64,
     tiebreak: u64,
     seq: u64,
     ev: Ev,
@@ -55,11 +58,16 @@ impl Eq for Scheduled {}
 impl Ord for Scheduled {
     /// Reversed: `BinaryHeap` is a max-heap and we want the earliest event first.
     ///
-    /// `tiebreak` is drawn from the PRNG at insertion, so events landing at the same instant are
+    /// `origin` comes first among events sharing an instant: whatever was due earlier happened
+    /// earlier, and a hold that lifts must hand over what it held in that order. Two messages on
+    /// one link never share an origin, so this is what keeps a FIFO link FIFO across a pause.
+    ///
+    /// `tiebreak` is drawn from the PRNG at insertion, so events that genuinely land together are
     /// ordered by the seed rather than by insertion order. Without this a sweep would re-explore
     /// a single interleaving forever. `seq` only breaks exact tiebreak collisions.
     fn cmp(&self, o: &Self) -> Ordering {
         o.time.cmp(&self.time)
+            .then_with(|| o.origin.cmp(&self.origin))
             .then_with(|| o.tiebreak.cmp(&self.tiebreak))
             .then_with(|| o.seq.cmp(&self.seq))
     }
@@ -84,6 +92,9 @@ pub struct Sim {
     last_sched: HashMap<(usize, usize), u64>,
     /// How many steps each node has taken, for the emit stagger.
     steps: HashMap<usize, u64>,
+    /// When each node's last message actually left, so a step beginning while the burst before it
+    /// is still draining starts its own after that one rather than jumping ahead of it.
+    last_emit: HashMap<usize, u64>,
 }
 
 impl Sim {
@@ -117,6 +128,7 @@ impl Sim {
             partition_side: vec![false; n],
             link_count: HashMap::new(),
             last_sched: HashMap::new(),
+            last_emit: HashMap::new(),
             steps: HashMap::new(),
             cfg,
         })
@@ -126,7 +138,7 @@ impl Sim {
         let tiebreak = self.rng.next_u64();
         let seq = self.seq;
         self.seq += 1;
-        self.queue.push(Scheduled { time, tiebreak, seq, ev });
+        self.queue.push(Scheduled { time, origin: time, tiebreak, seq, ev });
     }
 
     fn split_by_partition(&self, a: usize, b: usize) -> bool {
@@ -164,6 +176,12 @@ impl Sim {
         let step = *step;
         let mut rank = 0u64;
 
+        // A process sends sequentially across its steps as well as inside one: this step's burst
+        // starts after the last message the step before it got out, however far that one still
+        // stretches. Without it the first send of a step leaves at once, ahead of everything still
+        // queued, and a reply can overtake the request it answers on a link called FIFO.
+        let base = self.last_emit.get(&idx).map_or(self.now, |prev| self.now.max(prev + 1));
+
         for env in outputs {
             if env.dest == HARNESS {
                 self.handle_harness_message(idx, env);
@@ -174,7 +192,11 @@ impl Sim {
                 continue;
             };
             let _ = to;
-            let out_at = self.now + self.cfg.scenario.emit_at(idx, step, rank);
+            // Measured from the burst's base, so the stagger inside it is untouched: `emit_at` is
+            // a running total, and at `emit_gap: 0` it leaves every message of the step at one
+            // instant, which is what pinning the gap to zero is for.
+            let out_at = base + self.cfg.scenario.emit_at(idx, step, rank);
+            self.last_emit.insert(idx, out_at);
             rank += 1;
             self.schedule(out_at, Ev::Emit { from: idx, env });
         }
@@ -245,7 +267,7 @@ impl Sim {
             let tiebreak = self.rng.next_u64();
             let seq = self.seq;
             self.seq += 1;
-            self.queue.push(Scheduled { time: at, tiebreak, seq, ev: Ev::Fault(i) });
+            self.queue.push(Scheduled { time: at, origin: at, tiebreak, seq, ev: Ev::Fault(i) });
         }
 
         for (i, st) in self.cfg.scenario.stimuli.iter().enumerate() {
@@ -253,7 +275,7 @@ impl Sim {
             let tiebreak = self.rng.next_u64();
             let seq = self.seq;
             self.seq += 1;
-            self.queue.push(Scheduled { time: at, tiebreak, seq, ev: Ev::Stimulus(i) });
+            self.queue.push(Scheduled { time: at, origin: at, tiebreak, seq, ev: Ev::Stimulus(i) });
         }
 
         let ids: Vec<String> = self.nodes.iter().map(|n| n.id.clone()).collect();
@@ -287,9 +309,14 @@ impl Sim {
                 );
                 break;
             }
-            self.now = s.time;
+            let Scheduled { time, origin, tiebreak, seq, ev } = s;
+            self.now = time;
+            // An event the harness holds — a paused node's, a partitioned link's — goes back in
+            // with the instant it was first due at and the draw it already had. Scheduling it
+            // afresh would draw again, and a fresh draw shuffles everything one hold releases.
+            let again = |at, ev| Scheduled { time: at, origin, tiebreak, seq, ev };
 
-            match s.ev {
+            match ev {
                 Ev::Fault(i) => self.apply_fault(i),
 
                 Ev::Stimulus(i) => {
@@ -297,7 +324,7 @@ impl Sim {
                     let Some(&idx) = self.index.get(&st.node) else { continue };
                     if self.now < self.paused_until[idx] {
                         let at = self.paused_until[idx];
-                        self.schedule(at, Ev::Stimulus(i));
+                        self.queue.push(again(at, Ev::Stimulus(i)));
                         continue;
                     }
                     if !self.nodes[idx].alive { continue }
@@ -351,13 +378,13 @@ impl Sim {
                     // Held, not dropped: a partition that heals still delivers.
                     if self.split_by_partition(from, to) {
                         let at = self.partition_until;
-                        self.schedule(at, Ev::Deliver { from, env });
+                        self.queue.push(again(at, Ev::Deliver { from, env }));
                         continue;
                     }
                     // A paused node is alive but reacting to nothing yet.
                     if self.now < self.paused_until[to] {
                         let at = self.paused_until[to];
-                        self.schedule(at, Ev::Deliver { from, env });
+                        self.queue.push(again(at, Ev::Deliver { from, env }));
                         continue;
                     }
                     if !self.nodes[to].alive {
@@ -375,7 +402,7 @@ impl Sim {
                 Ev::Timer { node, timer_id } => {
                     if self.now < self.paused_until[node] {
                         let at = self.paused_until[node];
-                        self.schedule(at, Ev::Timer { node, timer_id });
+                        self.queue.push(again(at, Ev::Timer { node, timer_id }));
                         continue;
                     }
                     if !self.nodes[node].alive {
