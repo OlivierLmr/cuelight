@@ -178,6 +178,37 @@ fn a_pinned_gap_of_zero_still_leaves_a_step_at_one_instant() {
     assert!(burst.windows(2).all(|w| w[0] == w[1]), "a pinned gap of zero staggered a step: {burst:?}");
 }
 
+/// A pause and a partition hold messages; neither shuffles them.
+///
+/// Both put a message back in the queue at the instant the hold lifts, where several of them meet.
+/// Ordering that instant by a fresh draw scrambles a link that the scenario calls FIFO, and a
+/// scrambled link is indistinguishable from an algorithm that got its own bookkeeping wrong.
+#[test]
+fn a_held_message_keeps_its_place_in_the_line() {
+    if !have_python() {
+        return;
+    }
+    for (name, fault) in [
+        ("pause", r#"{"kind": "pause", "at": 50, "node": "n1", "duration": 950}"#),
+        ("partition", r#"{"kind": "partition", "at": 50, "duration": 950, "side": ["n1"]}"#),
+    ] {
+        let scenario = std::env::temp_dir().join(format!("cuelight-test-held-{name}.json"));
+        std::fs::write(
+            &scenario,
+            format!(
+                r#"{{"nodes": 2, "gst": 0, "fifo": true, "emit_gap": 0, "jitter_pct": 0,
+                     "delay_pre_default": 2, "delay_post_default": 2, "faults": [{fault}]}}"#
+            ),
+        )
+        .unwrap();
+        let out = tmp(&format!("held-{name}"));
+        assert!(run_scenario(&out, &scenario, "held-order.py"));
+        let got = deliveries(&out);
+        assert_eq!(got.len(), 6, "the fixture did not deliver its six messages: {got:?}");
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "the {name} shuffled the link: {got:?}");
+    }
+}
+
 /// A node that exits on its own fails the run. The tool knows which crashes it injected, and a
 /// program dying on unexpected input must not pass as having survived them.
 #[test]
