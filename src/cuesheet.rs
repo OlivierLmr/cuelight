@@ -383,7 +383,7 @@ mod tests {
             writeln!(f, "{l}").unwrap();
         }
         drop(f);
-        let out = dir.join("messages.st");
+        let out = dir.join("messages.cuesheet");
         render(&j, None, &out, 1000).unwrap();
         std::fs::read_to_string(out).unwrap()
     }

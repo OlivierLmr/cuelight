@@ -120,7 +120,7 @@ cuelight viz --journal store/latest/journal.jsonl
 
 # a space-time diagram: arrows slant from the instant a message left to the instant it landed
 cuelight viz --journal store/latest/journal.jsonl --format cuesheet
-cuesheet render store/latest/messages.st --style cuesheet.sts --out run.svg
+cuesheet render store/latest/messages.cuesheet --style cuesheet.cuestyle --out run.svg
 ```
 
 A checker has only to load the run directory into observations, stimuli and the crashed set, and

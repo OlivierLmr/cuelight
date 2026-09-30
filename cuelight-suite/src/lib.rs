@@ -352,7 +352,7 @@ fn draw(dir: &Path) -> Vec<PathBuf> {
         out.push(mmd);
     }
 
-    let st = dir.join("messages.st");
+    let st = dir.join("messages.cuesheet");
     let scenario = dir.join("scenario.json");
     let sc = scenario.exists().then_some(scenario);
     if cuelight::cuesheet::render(&journal, sc.as_deref(), &st, 200).is_ok() {

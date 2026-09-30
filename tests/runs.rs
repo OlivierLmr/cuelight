@@ -366,7 +366,7 @@ fn document(name: &str) -> String {
         .expect("cuelight viz runs");
     assert!(viz.status.success(), "{}", String::from_utf8_lossy(&viz.stderr));
 
-    std::fs::read_to_string(dir.join("messages.st")).expect("a document was written")
+    std::fs::read_to_string(dir.join("messages.cuesheet")).expect("a document was written")
 }
 
 #[test]
@@ -446,7 +446,7 @@ fn viz_writes_mermaid_by_default_and_cuesheet_when_asked() {
     let journal = dir.join("journal.jsonl");
     for (args, file, head) in [
         (vec![], "messages.mmd", "%%{init"),
-        (vec!["--format", "cuesheet"], "messages.st", "#"),
+        (vec!["--format", "cuesheet"], "messages.cuesheet", "#"),
     ] {
         let o = Command::new(BIN)
             .current_dir(root())

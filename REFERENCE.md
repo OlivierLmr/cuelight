@@ -197,7 +197,7 @@ cuelight scenario [options]                 print a drawn scenario, to edit by h
 | `--watchdog <ms>` | wall-clock hang detector (5000) |
 | `--out <dir>` | run directory (`store/latest`) |
 | `--journal <path>` | the journal `viz` renders |
-| `--format <kind>` | `mermaid` (default) writes `messages.mmd`, a sequence diagram that renders natively in a GitHub issue. `cuesheet` writes `messages.st`, a document [cuesheet](https://github.com/OlivierLmr/cuesheet) draws as a space-time diagram, with each arrow slanted from the instant its message left to the instant it landed. `cuesheet.sts` in this repository says what the words in that document are |
+| `--format <kind>` | `mermaid` (default) writes `messages.mmd`, a sequence diagram that renders natively in a GitHub issue. `cuesheet` writes `messages.cuesheet`, a document [cuesheet](https://github.com/OlivierLmr/cuesheet) draws as a space-time diagram, with each arrow slanted from the instant its message left to the instant it landed. `cuesheet.cuestyle` in this repository says what the words in that document are |
 
 ### The suite your binary gets
 

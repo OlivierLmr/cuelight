@@ -200,7 +200,7 @@ fn main() -> ExitCode {
                     viz::render(&j, &out, 200).map(|n| (out, n))
                 }
                 "cuesheet" => {
-                    let out = a.out.join("messages.st");
+                    let out = a.out.join("messages.cuesheet");
                     // The scenario carries the provenance and the GST, neither of which is in the
                     // journal, so the emitter reads the run directory rather than the journal alone.
                     let sc = a.scenario_path.clone().or_else(|| {
