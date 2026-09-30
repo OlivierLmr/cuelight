@@ -326,3 +326,170 @@ fn a_run_directory_holds_what_a_checker_needs() {
         assert!(out.join(format!("n{i}.stderr")).is_file(), "missing n{i}.stderr");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The cuesheet document: a real run, through the real binary
+// ---------------------------------------------------------------------------
+
+/// A scenario with all three faults in it, written by hand so the run is the same every time.
+const FAULTY: &str = r#"{
+  "nodes": 4, "f": 1, "gst": 400, "time_limit": 3000, "fifo": false,
+  "jitter_pct": 100, "emit_gap": 6,
+  "faults": [
+    { "kind": "pause",     "at": 120, "node": "n3", "duration": 140 },
+    { "kind": "partition", "at": 260, "duration": 240, "side": ["n0", "n2"] },
+    { "kind": "crash",     "at": 700, "node": "n1" }
+  ],
+  "stimuli": [] }"#;
+
+/// Run the faulty scenario and hand back the document `--format cuesheet` wrote.
+fn document(name: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("cuelight-doc-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sc = dir.join("in.json");
+    std::fs::write(&sc, FAULTY).unwrap();
+
+    let run = Command::new(BIN)
+        .current_dir(root())
+        .args(["run", "--scenario", sc.to_str().unwrap(), "--out", dir.to_str().unwrap()])
+        .args(["--bin", "python3", "testdata/chatter.py"])
+        .output()
+        .expect("cuelight runs");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+
+    let viz = Command::new(BIN)
+        .current_dir(root())
+        .args(["viz", "--journal", dir.join("journal.jsonl").to_str().unwrap()])
+        .args(["--out", dir.to_str().unwrap(), "--format", "cuesheet"])
+        .output()
+        .expect("cuelight viz runs");
+    assert!(viz.status.success(), "{}", String::from_utf8_lossy(&viz.stderr));
+
+    std::fs::read_to_string(dir.join("messages.cuesheet")).expect("a document was written")
+}
+
+#[test]
+fn a_run_becomes_a_document_that_names_every_process_and_every_fault() {
+    if !have_python() {
+        return;
+    }
+    let d = document("shape");
+
+    assert!(d.contains("participants n0 n1 n2 n3"), "{d}");
+    // Each fault, in the shape the renderer derives from.
+    assert!(d.contains("120 n3 paused @260"), "the pause is missing:\n{d}");
+    assert!(d.contains("260 network split n0 n2 @500"), "the partition is missing");
+    assert!(d.contains("700 n1 crash"), "the crash is missing");
+    assert!(d.contains("run end quiescent"), "the end is missing");
+    // The protocol's own words, with the journal's categorisation as a class.
+    assert!(d.contains(".hello") && d.contains(".ack"), "message types are missing");
+    assert!(d.contains("deliver .observe"), "observations are missing");
+}
+
+/// Every arrow says when it left and when it landed, which is what makes the slope mean something.
+#[test]
+fn every_arrow_in_the_document_carries_two_instants() {
+    if !have_python() {
+        return;
+    }
+    let d = document("arrows");
+    let mut arrows = 0;
+    for line in d.lines() {
+        if !line.contains(" -> ") {
+            continue;
+        }
+        arrows += 1;
+        let last = line.split_whitespace().last().unwrap();
+        assert!(
+            last.starts_with('@') || last.starts_with('+'),
+            "an arrow with no arrival: {line}"
+        );
+        // And it lands no earlier than it left.
+        let left: i64 = line.split_whitespace().next().unwrap().parse().unwrap();
+        if let Some(at) = last.strip_prefix('@') {
+            let landed: i64 = at.parse().unwrap();
+            assert!(landed >= left, "a message landed before it left: {line}");
+        }
+    }
+    assert!(arrows > 40, "expected a busy run, got {arrows} arrows");
+}
+
+/// The document is a function of the journal and nothing else, so a regenerated diagram diffs
+/// against the one before it.
+#[test]
+fn the_same_run_produces_the_same_document() {
+    if !have_python() {
+        return;
+    }
+    assert_eq!(document("det-a"), document("det-b"));
+}
+
+/// Both forms, because they are good at different things and neither is a fallback for the other.
+#[test]
+fn viz_writes_mermaid_by_default_and_cuesheet_when_asked() {
+    if !have_python() {
+        return;
+    }
+    let dir = std::env::temp_dir().join("cuelight-doc-both");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sc = dir.join("in.json");
+    std::fs::write(&sc, FAULTY).unwrap();
+    Command::new(BIN)
+        .current_dir(root())
+        .args(["run", "--scenario", sc.to_str().unwrap(), "--out", dir.to_str().unwrap()])
+        .args(["--bin", "python3", "testdata/chatter.py"])
+        .output()
+        .unwrap();
+
+    let journal = dir.join("journal.jsonl");
+    for (args, file, head) in [
+        (vec![], "messages.mmd", "%%{init"),
+        (vec!["--format", "cuesheet"], "messages.cuesheet", "#"),
+    ] {
+        let o = Command::new(BIN)
+            .current_dir(root())
+            .args(["viz", "--journal", journal.to_str().unwrap()])
+            .args(["--out", dir.to_str().unwrap()])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let body = std::fs::read_to_string(dir.join(file)).expect(file);
+        assert!(body.starts_with(head), "{file} began with {:?}", &body[..20.min(body.len())]);
+    }
+}
+
+#[test]
+fn an_unknown_format_names_the_two_that_exist() {
+    let o = Command::new(BIN)
+        .current_dir(root())
+        .args(["viz", "--journal", "whatever.jsonl", "--format", "postscript"])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    let e = String::from_utf8_lossy(&o.stderr);
+    assert!(e.contains("mermaid") && e.contains("cuesheet"), "{e}");
+}
+
+/// The provenance a figure in a handout needs to name the run behind it, and the GST trap: the
+/// scheduled instant is not the effective one when a fault outlasts it.
+#[test]
+fn the_document_carries_provenance_and_both_gst_instants() {
+    if !have_python() {
+        return;
+    }
+    let d = document("provenance");
+    // The run directory's own copy, which is the canonical replay unit, not whatever file the
+    // scenario happened to be typed into.
+    assert!(d.contains("# replay: cuelight run --scenario scenario.json"), "{d}");
+    // No absolute path: the same run must produce the same document wherever it is rendered.
+    assert!(!d.contains("/tmp/") && !d.contains("/var/"), "a path leaked into the document:\n{d}");
+    assert!(d.contains("# gst: scheduled 400"), "{d}");
+    assert!(
+        d.contains("in effect 700"),
+        "the crash at 700 outlasts the scheduled gst, and a reader who takes the scheduled one \
+         for the effective one has been caught out by exactly that:\n{d}"
+    );
+}

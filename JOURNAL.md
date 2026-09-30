@@ -26,7 +26,7 @@ to misbehave, and when it stopped.
 Two shapes. Both always carry `seq`, `t` and `kind`.
 
 ```json
-{"seq": 5, "t": 667, "kind": "send", "src": "n0", "dest": "n1", "body": { ... }}
+{"seq": 5, "t": 667, "kind": "send", "src": "n0", "dest": "n1", "mid": 12, "body": { ... }}
 {"seq": 14, "t": 672, "kind": "fault-crash", "detail": {"node": "n0"}}
 ```
 
@@ -36,6 +36,7 @@ Two shapes. Both always carry `seq`, `t` and `kind`.
 | `t` | **logical** time. Never wall-clock. Non-decreasing along `seq` |
 | `kind` | which of the entries below |
 | `src`, `dest`, `body` | message-shaped entries: the envelope as it travelled, its object keys sorted |
+| `mid` | **which message this is**: dense from 1, in the order messages leave their senders. Present on every entry about a message between two nodes — `send`, `recv`, `never-sent`, `drop-to-crashed` — and absent on everything else |
 | `detail` | event-shaped entries: what the harness did on its own |
 
 Nothing in a journal may vary between two runs of the same scenario against the same program: no
@@ -71,16 +72,29 @@ verbatim and moves on.
 | `fault-crash` | `node` | that node was killed and never returns |
 | `fault-pause` | `node`, `until` | stopped being scheduled until `until` |
 | `fault-partition` | `side`, `until` | the network split; `side` lists one half |
-| `drop-to-crashed` | `dest` | a message was discarded because its target was dead |
-| `drop-from-crashed` | `src`, `dest` | a still-in-flight message was discarded because its **sender** died |
+| `drop-to-crashed` | `src`, `dest`, `mid` | a message reached a node that was already dead, and died at its lifeline |
+| `never-sent` | `src`, `dest`, `mid` | a message its author never got out: it died partway through its send loop |
 | `node-died` | `node` | a node exited **on its own**. The harness did not do this, and the run has failed |
 | `unknown-destination` | `dest` | a node addressed something that is not a node or `harness` |
 | `time-limit` | `limit` | the run was cut off rather than settling |
 | `end` | `reason`, `scheduled` | always last. `reason` is `quiescent`, `time-limit`, or a failure |
 
-`drop-from-crashed` deserves attention when writing a checker: it is what makes a *partial
-broadcast* expressible. Without it, a sender dying halfway through still delivers to everyone and
-best-effort broadcast looks reliable.
+`never-sent` deserves attention when writing a checker: it is what makes a *partial broadcast*
+expressible. Without it, a sender dying halfway through still delivers to everyone and best-effort
+broadcast looks reliable.
+
+The name says what happened rather than how it was implemented: the message did not leave, so
+nothing was dropped in flight, because there was never anything in flight. This entry was
+documented here as `drop-from-crashed` for a while — a name no version of the harness ever wrote.
+
+## Pairing a `recv` with its `send`
+
+Use `mid`, and nothing else.
+
+It is tempting to match oldest-unmatched-first per link. That is exactly right when the link is
+FIFO and wrong otherwise — and `fifo` is a scenario field meant to be turned off, with
+`jitter_pct` defaulting to 100 so reordering genuinely happens. A mispairing is invisible in a list
+and obvious in a drawing: it puts two arrows crossing that never crossed.
 
 ## Two rules for anyone reading this file
 
@@ -101,8 +115,12 @@ grep -o '"kind":"[a-z-]*"' store/latest/journal.jsonl | sort | uniq -c
 # what did the nodes report?
 grep '"kind":"observe"' store/latest/journal.jsonl
 
-# a sequence diagram of the messages
+# a sequence diagram: horizontal arrows, renders natively on GitHub
 cuelight viz --journal store/latest/journal.jsonl
+
+# a space-time diagram: arrows slant from the instant a message left to the instant it landed
+cuelight viz --journal store/latest/journal.jsonl --format cuesheet
+cuesheet render store/latest/messages.cuesheet --style cuesheet.cuestyle --out run.svg
 ```
 
 A checker has only to load the run directory into observations, stimuli and the crashed set, and

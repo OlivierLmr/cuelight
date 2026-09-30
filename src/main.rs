@@ -4,7 +4,7 @@
 //! person typing `cuelight run` exercise the same code.
 
 use cuelight::scenario::{fingerprint, Drawn, Scenario, Space};
-use cuelight::{sim, viz};
+use cuelight::{cuesheet, sim, viz};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -15,7 +15,7 @@ cuelight: a deterministic discrete-event simulator for distributed systems
 USAGE:
     cuelight run    [options] --bin <cmd...>    one run
     cuelight check  [options] --bin <cmd...>    run twice, verify identical journals
-    cuelight viz    --journal <path> [--out <path>]
+    cuelight viz    --journal <path> [--out <path>] [--format mermaid|cuesheet]
     cuelight scenario [options]                 print a drawn scenario, to edit by hand
 
 The harness executes one scenario and records what happened; it never judges. Loop over seeds
@@ -29,12 +29,15 @@ OPTIONS:
     --watchdog <ms>    wall-clock hang detector       [default: 5000]
     --out <dir>        run directory                 [default: store/latest]
     --journal <path>   viz: journal to render
+    --format <kind>    viz: mermaid (default, renders natively on GitHub) or
+                       cuesheet (a space-time diagram, arrows slanted to their flight time)
 ";
 
 struct Args {
     program: Vec<String>,
     scenario_path: Option<PathBuf>,
     journal: Option<PathBuf>,
+    format: Option<String>,
     seed: u64,
     space: Space,
     /// Kept beside the parsed space so a drawn scenario can record where it came from, and what
@@ -51,6 +54,7 @@ impl Default for Args {
             program: vec![],
             scenario_path: None,
             journal: None,
+            format: None,
             seed: 1,
             space: Space::from_json("{}").expect("empty object is every default"),
             space_name: "(defaults)".into(),
@@ -78,6 +82,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "--scenario" => { a.scenario_path = Some(PathBuf::from(val(i)?)); i += 2 }
             "--journal" => { a.journal = Some(PathBuf::from(val(i)?)); i += 2 }
+            "--format" => { a.format = Some(val(i)?); i += 2 }
             "--seed" => { a.seed = val(i)?.parse().map_err(|_| "bad --seed")?; i += 2 }
             "--watchdog" => { a.watchdog = val(i)?.parse().map_err(|_| "bad --watchdog")?; i += 2 }
             "--out" => { a.out = PathBuf::from(val(i)?); i += 2 }
@@ -183,10 +188,31 @@ fn main() -> ExitCode {
                 eprintln!("error: viz needs --journal");
                 return ExitCode::FAILURE;
             };
-            let out = a.out.join("messages.mmd");
-            if let Some(p) = out.parent() { let _ = std::fs::create_dir_all(p); }
-            match viz::render(&j, &out, 200) {
-                Ok(n) => { println!("wrote {} ({n} messages)", out.display()); ExitCode::SUCCESS }
+            // Mermaid stays the default: it renders natively in a GitHub issue or pull request,
+            // from a fenced block, with no file and no build — which is exactly where a failing
+            // seed gets discussed.
+            let format = a.format.clone().unwrap_or_else(|| "mermaid".into());
+            if let Some(p) = a.out.parent() { let _ = std::fs::create_dir_all(p); }
+            let _ = std::fs::create_dir_all(&a.out);
+            let result = match format.as_str() {
+                "mermaid" => {
+                    let out = a.out.join("messages.mmd");
+                    viz::render(&j, &out, 200).map(|n| (out, n))
+                }
+                "cuesheet" => {
+                    let out = a.out.join("messages.cuesheet");
+                    // The scenario carries the provenance and the GST, neither of which is in the
+                    // journal, so the emitter reads the run directory rather than the journal alone.
+                    let sc = a.scenario_path.clone().or_else(|| {
+                        let beside = j.with_file_name("scenario.json");
+                        beside.exists().then_some(beside)
+                    });
+                    cuesheet::render(&j, sc.as_deref(), &out, 200).map(|n| (out, n))
+                }
+                other => Err(format!("unknown format {other}; there are two, mermaid and cuesheet")),
+            };
+            match result {
+                Ok((out, n)) => { println!("wrote {} ({n} messages)", out.display()); ExitCode::SUCCESS }
                 Err(e) => { eprintln!("error: {e}"); ExitCode::FAILURE }
             }
         }

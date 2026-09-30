@@ -9,7 +9,8 @@
 //!
 //! # The three public modules
 //!
-//! [`scenario`] builds what to run, [`sim`] runs it, [`viz`] renders what happened. A caller
+//! [`scenario`] builds what to run, [`sim`] runs it, and [`viz`] or [`cuesheet`] renders what
+//! happened. A caller
 //! draws a [`Scenario`] from a seed, hands it to a [`Sim`] with the command that launches one
 //! node, and reads the journal the run writes.
 //!
@@ -41,6 +42,7 @@ mod node;
 mod proto;
 mod rng;
 
+pub mod cuesheet;
 pub mod scenario;
 pub mod sim;
 pub mod viz;
