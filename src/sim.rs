@@ -84,6 +84,9 @@ pub struct Sim {
     last_sched: HashMap<(usize, usize), u64>,
     /// How many steps each node has taken, for the emit stagger.
     steps: HashMap<usize, u64>,
+    /// When each node's last message actually left, so a step beginning while the burst before it
+    /// is still draining starts its own after that one rather than jumping ahead of it.
+    last_emit: HashMap<usize, u64>,
 }
 
 impl Sim {
@@ -117,6 +120,7 @@ impl Sim {
             partition_side: vec![false; n],
             link_count: HashMap::new(),
             last_sched: HashMap::new(),
+            last_emit: HashMap::new(),
             steps: HashMap::new(),
             cfg,
         })
@@ -164,6 +168,12 @@ impl Sim {
         let step = *step;
         let mut rank = 0u64;
 
+        // A process sends sequentially across its steps as well as inside one: this step's burst
+        // starts after the last message the step before it got out, however far that one still
+        // stretches. Without it the first send of a step leaves at once, ahead of everything still
+        // queued, and a reply can overtake the request it answers on a link called FIFO.
+        let base = self.last_emit.get(&idx).map_or(self.now, |prev| self.now.max(prev + 1));
+
         for env in outputs {
             if env.dest == HARNESS {
                 self.handle_harness_message(idx, env);
@@ -174,7 +184,11 @@ impl Sim {
                 continue;
             };
             let _ = to;
-            let out_at = self.now + self.cfg.scenario.emit_at(idx, step, rank);
+            // Measured from the burst's base, so the stagger inside it is untouched: `emit_at` is
+            // a running total, and at `emit_gap: 0` it leaves every message of the step at one
+            // instant, which is what pinning the gap to zero is for.
+            let out_at = base + self.cfg.scenario.emit_at(idx, step, rank);
+            self.last_emit.insert(idx, out_at);
             rank += 1;
             self.schedule(out_at, Ev::Emit { from: idx, env });
         }

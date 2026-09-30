@@ -123,6 +123,10 @@ cannot occur. With one, a crash between two sends stops the rest from ever leavi
 the half-delivered broadcast a reliable layer repairs. A message that *did* leave arrives however
 slow the link: nothing unsends a packet.
 
+The gap staggers a process's sends; it never reorders them. A step that begins while the burst
+before it is still draining queues behind it, so the first message of the new step leaves after the
+last message of the old one.
+
 **Who an event acts on**, and how many copies of it there are:
 
 | | |
