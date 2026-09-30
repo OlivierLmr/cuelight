@@ -49,6 +49,12 @@ Plus, on every link: a delay drawn per link, larger before **GST** and small aft
 that scales with the link's own delay so reordering is actually possible; and an optional
 per-link **FIFO** mode for algorithms that require ordered channels.
 
+**FIFO is in program order**: what a process handed to `send` first arrives first, whatever step it
+sent it in, and whatever held it on the way. Neither the emit stagger below nor a pause nor a
+partition may hand two messages over in the other order. Algorithms like Lamport's mutual exclusion
+rest on this: a reply that overtook the request it answers is indistinguishable, from inside the
+algorithm, from a request that was never sent.
+
 GST, the *Global Stabilisation Time*, is the instant after which delays become bounded. Before
 it, the network may behave arbitrarily badly. It is what makes partial synchrony testable.
 
@@ -122,6 +128,10 @@ same instant, nothing can happen between them, and a sender that dies partway th
 cannot occur. With one, a crash between two sends stops the rest from ever leaving, which is exactly
 the half-delivered broadcast a reliable layer repairs. A message that *did* leave arrives however
 slow the link: nothing unsends a packet.
+
+The gap staggers a process's sends; it never reorders them. A step that begins while the burst
+before it is still draining queues behind it, so the first message of the new step leaves after the
+last message of the old one.
 
 **Who an event acts on**, and how many copies of it there are:
 
