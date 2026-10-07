@@ -33,7 +33,14 @@ fn check(ev: &Events, sc: &Scenario, r: &mut Report) {
 
 fn main() -> ExitCode {
     cuelight_suite::run(
-        Suite { name: "demo", parametric: PARAMETRIC, written: WRITTEN, check },
+        Suite {
+            name: "demo",
+            parametric: PARAMETRIC,
+            written: WRITTEN,
+            check,
+            // This repository keeps one at its root, so a failing demo seed says how to draw it.
+            style: Some("cuesheet.cuestyle"),
+        },
         env!("CARGO_MANIFEST_DIR"),
     )
 }

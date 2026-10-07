@@ -107,6 +107,23 @@ fn a_failure_is_reported_with_the_command_that_reproduces_it() {
     assert!(text.contains("journal:"), "{text}");
 }
 
+/// The path reaches the reader already; what to type did not. The demo names a style sheet, so a
+/// failing seed must offer the command whole, ready to paste.
+#[test]
+fn a_failure_offers_the_command_that_draws_it() {
+    if !have_python() {
+        return;
+    }
+    let (ok, text) = demo_run("draws", "silent.py", &[]);
+    assert!(!ok, "a silent node passed: {text}");
+    assert!(text.contains("messages.cuesheet"), "no document was drawn: {text}");
+    assert!(text.contains("render:  cuesheet render"), "{text}");
+    assert!(text.contains("--style cuesheet.cuestyle --open"), "{text}");
+    // Paste-ready means the document in the command is the one just named above it.
+    let hint = text.lines().find(|l| l.contains("render:  cuesheet")).expect("a render line");
+    assert!(hint.contains("messages.cuesheet"), "{hint}");
+}
+
 #[test]
 fn a_node_that_does_not_replay_stops_the_suite_before_any_verdict() {
     if !have_python() {
