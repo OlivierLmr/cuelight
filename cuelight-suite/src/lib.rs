@@ -728,8 +728,8 @@ mod tests {
     use super::*;
 
     fn drawn() -> Vec<PathBuf> {
-        vec![PathBuf::from("store/lab1/sweep/7/messages.mmd"),
-             PathBuf::from("store/lab1/sweep/7/messages.cuesheet")]
+        vec![PathBuf::from("store/suite/sweep/7/messages.mmd"),
+             PathBuf::from("store/suite/sweep/7/messages.cuesheet")]
     }
 
     /// The whole point: a path a reader cannot open, plus the line that opens it.
@@ -738,7 +738,7 @@ mod tests {
         let line = render_hint(&drawn(), Some("cuesheet.cuestyle")).expect("a hint");
         assert_eq!(
             line,
-            "render:  cuesheet render store/lab1/sweep/7/messages.cuesheet \
+            "render:  cuesheet render store/suite/sweep/7/messages.cuesheet \
              --style cuesheet.cuestyle --open"
                 .replace("             ", "")
         );
@@ -754,7 +754,7 @@ mod tests {
     /// And no document means no command either, whatever the caller named.
     #[test]
     fn no_document_means_no_command() {
-        let only_mermaid = vec![PathBuf::from("store/lab1/sweep/7/messages.mmd")];
+        let only_mermaid = vec![PathBuf::from("store/suite/sweep/7/messages.mmd")];
         assert_eq!(render_hint(&only_mermaid, Some("cuesheet.cuestyle")), None);
     }
 }
