@@ -9,6 +9,8 @@ name = "cuelight"
 version = "0.6.0"
 edition = "2021"
 description = "Deterministic discrete-event simulator for distributed systems: the network, the clock and the faults"
+license = "MIT"
+repository = "https://github.com/OlivierLmr/cuelight"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
