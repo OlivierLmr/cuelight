@@ -22,7 +22,8 @@
 //!
 //! fn main() -> ExitCode {
 //!     cuelight_suite::run(
-//!         Suite { name: "mine", parametric: SPACES, written: &[], check },
+//!         Suite { name: "mine", parametric: SPACES, written: &[], check,
+//!                 style: Some("cuesheet.cuestyle") },
 //!         env!("CARGO_MANIFEST_DIR"),
 //!     )
 //! }
@@ -196,6 +197,14 @@ pub struct Suite {
     /// keeping live here rather than as a seed.
     pub written: &'static [Written],
     pub check: fn(&Events, &Scenario, &mut Report),
+    /// Where the caller keeps its cuesheet style sheet, if it has one, so that a failing seed can
+    /// print the command that draws it.
+    ///
+    /// A path, never a vocabulary: the harness still has no idea what any of the words in that
+    /// file mean, and never opens it. `None` prints nothing, which is the right answer for a
+    /// caller that has no sheet, since under cuesheet's own rules the command would fail without
+    /// one and a command that cannot work is worse than no command at all.
+    pub style: Option<&'static str>,
 }
 
 // ------------------------------------------------------------------- running
@@ -362,15 +371,37 @@ fn draw(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Where to read what happened. The run directory holds it all, but nobody guesses its path.
-fn where_to_read(dir: &Path) {
+///
+/// A path a reader cannot open is halfway to useless, so when the caller has named a style sheet
+/// the command that turns the document into a picture is printed too, ready to paste. The syntax
+/// is cuesheet's and is written here as a literal, which is a coupling worth naming: if that CLI
+/// changes, this line goes stale with nothing to catch it. It is the same string JOURNAL.md
+/// carries, so the two drift together rather than separately.
+fn where_to_read(dir: &Path, style: Option<&str>) {
     let journal = dir.join("journal.jsonl");
     if journal.exists() {
         println!("    journal: {}", journal.display());
     }
-    for (i, d) in draw(dir).iter().enumerate() {
+    let drawn = draw(dir);
+    for (i, d) in drawn.iter().enumerate() {
         let label = if i == 0 { "diagram" } else { "        " };
         println!("    {label}: {}", d.display());
     }
+    if let Some(line) = render_hint(&drawn, style) {
+        println!("    {line}");
+    }
+}
+
+/// The paste-ready render command, or nothing.
+///
+/// Nothing in two cases, and they are different: the caller named no style sheet, or no document
+/// was drawn. Under cuesheet's own rule a render without a sheet is an error, so printing the
+/// command anyway would hand the reader something that cannot work, which is worse than handing
+/// them nothing.
+fn render_hint(drawn: &[PathBuf], style: Option<&str>) -> Option<String> {
+    let style = style?;
+    let doc = drawn.iter().find(|d| d.extension().is_some_and(|e| e == "cuesheet"))?;
+    Some(format!("render:  cuesheet render {} --style {style} --open", doc.display()))
 }
 
 /// The command that runs this one case again, ready to paste.
@@ -564,7 +595,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
             // relative to the two spaces it was drawn from.
             println!("  seed {s}: {e}");
             how_to_replay(&name, &o, &format!("--seed {s} --only {name_of}"));
-            where_to_read(&o.out.join(&name_of).join(s.to_string()));
+            where_to_read(&o.out.join(&name_of).join(s.to_string()), suite.style);
         }
         if fails.len() > 5 {
             println!("  ... and {} more", fails.len() - 5);
@@ -610,7 +641,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
                     }
                     // Always, even when it behaved: a written scenario is often run precisely to
                     // be looked at, and the diagram is the reason to look.
-                    where_to_read(&dir);
+                    where_to_read(&dir, suite.style);
                 }
             },
         }
@@ -692,5 +723,38 @@ mod tests {
             {"kind": "pause", "at": 3000, "node": "n1", "duration": 10},
             {"kind": "crash", "at": 200, "node": "n2"}]}"#);
         assert_eq!(effective_gst(&s), 3010);
+    }
+
+    use super::*;
+
+    fn drawn() -> Vec<PathBuf> {
+        vec![PathBuf::from("store/lab1/sweep/7/messages.mmd"),
+             PathBuf::from("store/lab1/sweep/7/messages.cuesheet")]
+    }
+
+    /// The whole point: a path a reader cannot open, plus the line that opens it.
+    #[test]
+    fn a_named_style_sheet_produces_a_command_that_can_be_pasted() {
+        let line = render_hint(&drawn(), Some("cuesheet.cuestyle")).expect("a hint");
+        assert_eq!(
+            line,
+            "render:  cuesheet render store/lab1/sweep/7/messages.cuesheet \
+             --style cuesheet.cuestyle --open"
+                .replace("             ", "")
+        );
+    }
+
+    /// A caller with no sheet gets no command. cuesheet refuses to render without one, so the line
+    /// would be an instruction to fail.
+    #[test]
+    fn no_style_sheet_means_no_command() {
+        assert_eq!(render_hint(&drawn(), None), None);
+    }
+
+    /// And no document means no command either, whatever the caller named.
+    #[test]
+    fn no_document_means_no_command() {
+        let only_mermaid = vec![PathBuf::from("store/lab1/sweep/7/messages.mmd")];
+        assert_eq!(render_hint(&only_mermaid, Some("cuesheet.cuestyle")), None);
     }
 }

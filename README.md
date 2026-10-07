@@ -57,7 +57,10 @@ fn check(ev: &Events, _sc: &Scenario, r: &mut Report) {
 
 fn main() -> ExitCode {
     cuelight_suite::run(
-        Suite { name: "mine", parametric: SPACES, written: &[], check },
+        Suite { name: "mine", parametric: SPACES, written: &[], check,
+                // Where you keep a cuesheet style sheet, so a failing seed prints the
+                // command that draws it. `None` prints nothing.
+                style: Some("cuesheet.cuestyle") },
         env!("CARGO_MANIFEST_DIR"),
     )
 }
