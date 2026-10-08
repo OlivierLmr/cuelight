@@ -90,6 +90,12 @@ pub struct Events {
     pub observes: Vec<(u64, String, Value)>,
     /// `(t, node, body)`: things the harness asked of a node.
     pub stimuli: Vec<(u64, String, Value)>,
+    /// `(t, src, dest, body)`: every message a node sent to another node, in the order they left.
+    ///
+    /// Some properties are about traffic rather than about what a node reports: how many messages
+    /// a change costs, or who is still talking once things have settled. The journal has always
+    /// recorded this; a checker simply had no way to reach it.
+    pub sends: Vec<(u64, String, String, Value)>,
     pub crashed: HashMap<String, u64>,
     pub end: u64,
     /// True when the run was cut at the time limit instead of running out of events.
@@ -129,8 +135,14 @@ pub fn ty(b: &Value) -> &str {
 pub fn load_events(dir: &Path) -> Result<Events, String> {
     let jpath = dir.join("journal.jsonl");
     let f = std::fs::File::open(&jpath).map_err(|e| format!("{}: {e}", jpath.display()))?;
-    let mut ev =
-        Events { observes: vec![], stimuli: vec![], crashed: HashMap::new(), end: 0, truncated: false };
+    let mut ev = Events {
+        observes: vec![],
+        stimuli: vec![],
+        sends: vec![],
+        crashed: HashMap::new(),
+        end: 0,
+        truncated: false,
+    };
     for line in BufReader::new(f).lines() {
         let line = line.map_err(|e| e.to_string())?;
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
@@ -141,6 +153,11 @@ pub fn load_events(dir: &Path) -> Result<Events, String> {
             "observe" => {
                 let src = v.get("src").and_then(Value::as_str).unwrap_or("").to_string();
                 ev.observes.push((t, src, body));
+            }
+            "send" => {
+                let src = v.get("src").and_then(Value::as_str).unwrap_or("").to_string();
+                let dst = v.get("dest").and_then(Value::as_str).unwrap_or("").to_string();
+                ev.sends.push((t, src, dst, body));
             }
             "stimulus" => {
                 let dst = v.get("dest").and_then(Value::as_str).unwrap_or("").to_string();
@@ -749,6 +766,28 @@ mod tests {
     #[test]
     fn no_style_sheet_means_no_command() {
         assert_eq!(render_hint(&drawn(), None), None);
+    }
+
+    /// A checker can count traffic: every message between two nodes is handed over, in the order
+    /// they left, and what a node says to the harness is not one of them.
+    #[test]
+    fn the_sends_of_a_run_reach_the_checker() {
+        let dir = std::env::temp_dir().join("cuelight-suite-test-sends");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let journal = [
+            r#"{"seq":0,"t":3,"kind":"send","src":"n0","dest":"n1","mid":1,"body":{"type":"hello"}}"#,
+            r#"{"seq":1,"t":4,"kind":"observe","src":"n0","dest":"harness","body":{"type":"said"}}"#,
+            r#"{"seq":2,"t":9,"kind":"recv","src":"n0","dest":"n1","mid":1,"body":{"type":"hello"}}"#,
+            r#"{"seq":3,"t":9,"kind":"send","src":"n1","dest":"n0","mid":2,"body":{"type":"hi"}}"#,
+        ]
+        .join("\n");
+        std::fs::write(dir.join("journal.jsonl"), journal).unwrap();
+        let ev = load_events(&dir).expect("events");
+        let seen: Vec<(u64, &str, &str, &str)> =
+            ev.sends.iter().map(|(t, s, d, b)| (*t, s.as_str(), d.as_str(), ty(b))).collect();
+        assert_eq!(seen, vec![(3, "n0", "n1", "hello"), (9, "n1", "n0", "hi")]);
+        assert_eq!(ev.observes.len(), 1);
     }
 
     /// And no document means no command either, whatever the caller named.
