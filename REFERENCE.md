@@ -212,6 +212,7 @@ A binary built on `cuelight-suite` parses these for you, identically whatever it
 | `--seed <a>[..<b>]` | one seed, or an inclusive range, instead of every seed |
 | `--only <name>` | run only what matches: a parametric scenario's name, or a written scenario's |
 | `--watchdog <ms>` | wall-clock hang detector (5000) |
+| `--jobs <n>` | how many seeds run at once (half the cores: a simulation starts a process per node, so one per core oversubscribes the machine). The output is the same whatever the number: verdicts are printed in seed order |
 | `--list` | show what this suite declares, then exit |
 
 `--seed` and `--only` are what make one failure cheap to look at: they run that case and nothing

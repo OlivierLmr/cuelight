@@ -123,5 +123,8 @@ cuelight viz --journal store/latest/journal.jsonl --format cuesheet
 cuesheet render store/latest/messages.cuesheet --style cuesheet.cuestyle --out run.svg
 ```
 
-A checker has only to load the run directory into observations, stimuli and the crashed set, and
-compute the effective GST from the scenario. Nothing else is required of it.
+A checker has only to load the run directory into observations, stimuli, the messages nodes sent
+one another and the crashed set, and compute the effective GST from the scenario. Nothing else is
+required of it. `cuelight-suite` does that loading: its `Events` carries each `send` entry as
+instant, sender, destination, `mid` and body, in journal order, so a property about traffic never
+has to find this file itself.

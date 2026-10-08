@@ -83,6 +83,18 @@ impl Report {
 
 // ------------------------------------------------------------- what a run is
 
+/// One message a node sent to another node, as the journal's `send` entry records it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sent {
+    /// When it left, in logical time. Not when it arrived, if it ever did.
+    pub t: u64,
+    pub src: String,
+    pub dest: String,
+    /// Which message this is: the journal's `mid`, dense from 1 in the order messages leave.
+    pub mid: u64,
+    pub body: Value,
+}
+
 /// Everything a property can be stated over: what nodes observed, what the harness asked of them,
 /// and who died.
 pub struct Events {
@@ -90,12 +102,12 @@ pub struct Events {
     pub observes: Vec<(u64, String, Value)>,
     /// `(t, node, body)`: things the harness asked of a node.
     pub stimuli: Vec<(u64, String, Value)>,
-    /// `(t, src, dest, body)`: every message a node sent to another node, in the order they left.
+    /// Every message a node sent to another node, in the order they left.
     ///
     /// Some properties are about traffic rather than about what a node reports: how many messages
     /// a change costs, or who is still talking once things have settled. The journal has always
     /// recorded this; a checker simply had no way to reach it.
-    pub sends: Vec<(u64, String, String, Value)>,
+    pub sends: Vec<Sent>,
     pub crashed: HashMap<String, u64>,
     pub end: u64,
     /// True when the run was cut at the time limit instead of running out of events.
@@ -157,7 +169,8 @@ pub fn load_events(dir: &Path) -> Result<Events, String> {
             "send" => {
                 let src = v.get("src").and_then(Value::as_str).unwrap_or("").to_string();
                 let dst = v.get("dest").and_then(Value::as_str).unwrap_or("").to_string();
-                ev.sends.push((t, src, dst, body));
+                let mid = v.get("mid").and_then(Value::as_u64).unwrap_or(0);
+                ev.sends.push(Sent { t, src, dest: dst, mid, body });
             }
             "stimulus" => {
                 let dst = v.get("dest").and_then(Value::as_str).unwrap_or("").to_string();
@@ -236,6 +249,8 @@ struct Opts {
     only: Option<String>,
     list: bool,
     watchdog: u64,
+    /// How many seeds run at once.
+    jobs: usize,
     program: Vec<String>,
 }
 
@@ -260,6 +275,7 @@ OPTIONS:
     --seed <a>[..<b>]  run one seed, or an inclusive range, instead of every seed
     --only <name>      run only what matches: a parametric scenario's name or a written scenario's
     --watchdog <ms>    wall-clock hang detector      [default: 5000]
+    --jobs <n>         seeds run at once             [default: half the cores]
     --list             show the parametric and scenarios this suite defines, then exit
 "
     )
@@ -274,6 +290,12 @@ fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, 
         only: None,
         list: false,
         watchdog: 5_000,
+        // Half the cores, rounded up. A simulation waits on one node at a time, but it starts a
+        // process per node and those starts overlap, so one per core oversubscribes the machine.
+        // Measured on twelve cores, 200 seeds of one space: 23.4 s at one job, 10.0 at four,
+        // 8.9 at six, 8.5 at eight, then 10.8 at twelve — slower than eight, and no faster than
+        // four. Half is within a few percent of the best and leaves the machine usable.
+        jobs: std::thread::available_parallelism().map(|n| n.get().div_ceil(2)).unwrap_or(1),
         program: vec![],
     };
     let mut i = 0;
@@ -293,6 +315,13 @@ fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, 
             "--out" => { o.out = PathBuf::from(val(i)?); i += 2 }
             "--seeds" => { o.seeds = Some(val(i)?.parse().map_err(|_| "bad --seeds")?); i += 2 }
             "--watchdog" => { o.watchdog = val(i)?.parse().map_err(|_| "bad --watchdog")?; i += 2 }
+            "--jobs" => {
+                o.jobs = val(i)?.parse().map_err(|_| "bad --jobs")?;
+                if o.jobs == 0 {
+                    return Err("--jobs 0: at least one seed has to run at a time".into());
+                }
+                i += 2
+            }
             "--seed" => {
                 let v = val(i)?;
                 let (a, b) = match v.split_once("..") {
@@ -438,6 +467,57 @@ fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// Run and judge one seed of one parametric scenario. `None` is a pass; otherwise, why not.
+fn one_seed(o: &Opts, suite: &Suite, p: &Parametric, sp: &Spaces, name_of: &str, seed: u64) -> Option<String> {
+    let dir = o.out.join(name_of).join(seed.to_string());
+    let sc = Scenario::draw(seed, &sp.space).from(provenance(p, sp, seed));
+    let late = past_the_limit(&sc);
+    if late > 0 {
+        return Some(format!("{late} event(s) scheduled past the time limit; they cannot happen"));
+    }
+    if let Err(e) = run_once(o, &dir, sc.clone()) {
+        return Some(e);
+    }
+    let ev = match load_events(&dir) {
+        Ok(ev) => ev,
+        Err(e) => return Some(e),
+    };
+    let mut r = Report::default();
+    (suite.check)(&ev, &sc, &mut r);
+    if r.ok() {
+        let _ = std::fs::remove_dir_all(&dir); // keep only failures
+        None
+    } else {
+        Some(r.failed().join(", "))
+    }
+}
+
+/// Apply `f` to every seed of `lo..=hi`, at most `jobs` at a time, and return the results in seed
+/// order whatever order they finished in.
+///
+/// The concurrency is between simulations, never inside one: a simulation stays a single thread
+/// advancing logical time, which is the whole reason this tool exists.
+fn each_seed<T: Send>(lo: u64, hi: u64, jobs: usize, f: impl Fn(u64) -> T + Sync) -> Vec<(u64, T)> {
+    let next = std::sync::atomic::AtomicU64::new(lo);
+    let done = std::sync::Mutex::new(Vec::new());
+    let workers = (jobs.max(1) as u64).min(hi.saturating_sub(lo) + 1);
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                let seed = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if seed > hi {
+                    break;
+                }
+                let out = f(seed);
+                done.lock().unwrap().push((seed, out));
+            });
+        }
+    });
+    let mut done = done.into_inner().unwrap();
+    done.sort_by_key(|(seed, _)| *seed);
+    done
+}
+
 /// Replay one case and compare the two journals, before judging anything.
 ///
 /// The error carries its own banner, because two very different things fail here and a newcomer
@@ -575,36 +655,15 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
 
         let seeds = o.seeds.unwrap_or(p.seeds);
         let (lo, hi) = o.range.unwrap_or((1, seeds));
-        let mut pass = 0u64;
-        let mut fails: Vec<(u64, String)> = vec![];
-        for seed in lo..=hi {
-            let dir = o.out.join(&name_of).join(seed.to_string());
-            let sc = Scenario::draw(seed, &sp.space).from(provenance(p, &sp, seed));
-            let late = past_the_limit(&sc);
-            if late > 0 {
-                fails.push((
-                    seed,
-                    format!("{late} event(s) scheduled past the time limit; they cannot happen"),
-                ));
-                continue;
-            }
-            match run_once(&o, &dir, sc.clone()) {
-                Err(e) => fails.push((seed, e)),
-                Ok(()) => match load_events(&dir) {
-                    Err(e) => fails.push((seed, e)),
-                    Ok(ev) => {
-                        let mut r = Report::default();
-                        (suite.check)(&ev, &sc, &mut r);
-                        if r.ok() {
-                            pass += 1;
-                            let _ = std::fs::remove_dir_all(&dir); // keep only failures
-                        } else {
-                            fails.push((seed, r.failed().join(", ")));
-                        }
-                    }
-                },
-            }
-        }
+        // Runs share nothing: each has its own seed, its own node processes and its own
+        // directory. So they can overlap without any of them noticing, and determinism, which is
+        // a property of one run, is untouched. What must not change is what gets *printed*: the
+        // verdicts are collected and then read in seed order, so the first five failures shown
+        // are the five lowest whatever finished first.
+        let verdicts = each_seed(lo, hi, o.jobs, |seed| one_seed(&o, &suite, p, &sp, &name_of, seed));
+        let pass = verdicts.iter().filter(|(_, v)| v.is_none()).count() as u64;
+        let fails: Vec<(u64, String)> =
+            verdicts.into_iter().filter_map(|(seed, v)| v.map(|why| (seed, why))).collect();
         println!("{name_of}: {pass}/{} seeds passed{}", hi - lo + 1,
                  if o.range.is_some() { format!(" (seeds {lo}..{hi})") } else { String::new() });
         for (s, e) in fails.iter().take(5) {
@@ -768,6 +827,47 @@ mod tests {
         assert_eq!(render_hint(&drawn(), None), None);
     }
 
+    /// The same, on a run that really happened: three nodes greeting one another. Every `send`
+    /// line of the journal is handed over, numbered as the journal numbers it.
+    #[test]
+    fn the_sends_of_a_real_run_are_all_there() {
+        let python = std::process::Command::new("python3").arg("--version").output();
+        if !python.map(|o| o.status.success()).unwrap_or(false) {
+            return;
+        }
+        let node = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/chatter.py");
+        let argv = vec!["--bin".to_string(), "python3".to_string(), node.display().to_string()];
+        let o = parse(&argv, "t", ".").expect("options");
+        let dir = std::env::temp_dir().join("cuelight-suite-test-real-sends");
+        let _ = std::fs::remove_dir_all(&dir);
+        run_once(&o, &dir, sc(r#"{"nodes": 3, "time_limit": 400}"#)).expect("the run");
+        let ev = load_events(&dir).expect("events");
+
+        let journal = std::fs::read_to_string(dir.join("journal.jsonl")).unwrap();
+        let written = journal.lines().filter(|l| l.contains(r#""kind":"send""#)).count();
+        assert!(written >= 6, "three nodes greet two peers each, at the very least");
+        assert_eq!(ev.sends.len(), written);
+        let mids: Vec<u64> = ev.sends.iter().map(|m| m.mid).collect();
+        assert_eq!(mids, (1..=written as u64).collect::<Vec<_>>(), "dense from 1, in the order they left");
+        assert!(ev.sends.iter().all(|m| m.src != m.dest && m.dest != "harness"));
+        assert!(ev.sends.windows(2).all(|w| w[0].t <= w[1].t));
+    }
+
+    /// Whatever finishes first, results come back in seed order, each seed exactly once.
+    #[test]
+    fn seeds_run_at_once_still_come_back_in_order() {
+        for jobs in [1, 3, 16] {
+            let got = each_seed(5, 40, jobs, |seed| {
+                // The low seeds are the slow ones, so they finish last when there is room to overlap.
+                std::thread::sleep(std::time::Duration::from_millis(if seed < 10 { 3 } else { 0 }));
+                seed * 2
+            });
+            let want: Vec<(u64, u64)> = (5..=40).map(|s| (s, s * 2)).collect();
+            assert_eq!(got, want, "with {jobs} job(s)");
+        }
+        assert_eq!(each_seed(7, 7, 8, |s| s), vec![(7, 7)]);
+    }
+
     /// A checker can count traffic: every message between two nodes is handed over, in the order
     /// they left, and what a node says to the harness is not one of them.
     #[test]
@@ -784,9 +884,12 @@ mod tests {
         .join("\n");
         std::fs::write(dir.join("journal.jsonl"), journal).unwrap();
         let ev = load_events(&dir).expect("events");
-        let seen: Vec<(u64, &str, &str, &str)> =
-            ev.sends.iter().map(|(t, s, d, b)| (*t, s.as_str(), d.as_str(), ty(b))).collect();
-        assert_eq!(seen, vec![(3, "n0", "n1", "hello"), (9, "n1", "n0", "hi")]);
+        let seen: Vec<(u64, &str, &str, u64, &str)> = ev
+            .sends
+            .iter()
+            .map(|m| (m.t, m.src.as_str(), m.dest.as_str(), m.mid, ty(&m.body)))
+            .collect();
+        assert_eq!(seen, vec![(3, "n0", "n1", 1, "hello"), (9, "n1", "n0", 2, "hi")]);
         assert_eq!(ev.observes.len(), 1);
     }
 
