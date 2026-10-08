@@ -275,7 +275,7 @@ OPTIONS:
     --seed <a>[..<b>]  run one seed, or an inclusive range, instead of every seed
     --only <name>      run only what matches: a parametric scenario's name or a written scenario's
     --watchdog <ms>    wall-clock hang detector      [default: 5000]
-    --jobs <n>         seeds run at once             [default: one per core]
+    --jobs <n>         seeds run at once             [default: half the cores]
     --list             show the parametric and scenarios this suite defines, then exit
 "
     )
@@ -290,10 +290,12 @@ fn parse(argv: &[String], suite: &str, default_suite_dir: &str) -> Result<Opts, 
         only: None,
         list: false,
         watchdog: 5_000,
-        // One simulation keeps about one core busy: it spawns a process per node but only ever
-        // waits on one of them at a time. So the number of cores is the ceiling, not cores
-        // divided by the size of the group.
-        jobs: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+        // Half the cores, rounded up. A simulation waits on one node at a time, but it starts a
+        // process per node and those starts overlap, so one per core oversubscribes the machine.
+        // Measured on twelve cores, 200 seeds of one space: 23.4 s at one job, 10.0 at four,
+        // 8.9 at six, 8.5 at eight, then 10.8 at twelve — slower than eight, and no faster than
+        // four. Half is within a few percent of the best and leaves the machine usable.
+        jobs: std::thread::available_parallelism().map(|n| n.get().div_ceil(2)).unwrap_or(1),
         program: vec![],
     };
     let mut i = 0;
