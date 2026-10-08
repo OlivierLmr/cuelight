@@ -196,3 +196,26 @@ fn one_seed_runs_one_seed_and_leaves_the_written_scenarios_alone() {
     // Asking for a seed means asking for drawn runs: a written scenario has none.
     assert!(!text.contains("→ as expected"), "{text}");
 }
+
+/// Running seeds at once must change nothing a reader can see: same verdicts, same five failing
+/// seeds shown, same commands under them. Compared on a node that passes everything and on one
+/// that fails everything, since the second is where the order of the output could slip.
+#[test]
+fn the_output_is_the_same_however_many_seeds_run_at_once() {
+    if !have_python() {
+        return;
+    }
+    for node in ["poked.py", "silent.py"] {
+        let (ok_one, one) = demo_run("jobs", node, &["--seeds", "12", "--jobs", "1"]);
+        let (ok_many, many) = demo_run("jobs", node, &["--seeds", "12", "--jobs", "6"]);
+        assert_eq!(ok_one, ok_many, "{node}: the exit status changed with --jobs");
+        assert_eq!(one, many, "{node}: the output changed with --jobs");
+        assert!(one.contains("/12 seeds passed"), "{one}");
+    }
+}
+
+#[test]
+fn zero_jobs_is_refused() {
+    let (ok, out) = demo_run("jobs-zero", "poked.py", &["--jobs", "0"]);
+    assert!(!ok && out.contains("--jobs 0"), "{out}");
+}
