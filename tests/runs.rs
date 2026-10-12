@@ -388,7 +388,8 @@ fn a_run_becomes_a_document_that_names_every_process_and_every_fault() {
     // alone tells a reader that something was delivered, never what.
     assert!(d.contains("deliver \"deliver mid=ack-from-"), "observations are missing:\n{d}");
     assert!(d.contains(".observe {\n  mid: ack-from-"), "an observation has no hover block:\n{d}");
-    // A message carries its body the same way, and no label: thousands of arrows would bury it.
+    // A message carries its body the same way. One with nothing but a type gets no label of its
+    // own, so a style sheet still names it.
     assert!(d.contains(".hello @") && d.contains("{\n  type: hello\n}"), "a message has no hover block:\n{d}");
 }
 

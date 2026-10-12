@@ -112,8 +112,8 @@ fn hover(body: Option<&Value>) -> Option<String> {
 
 /// The kind, then what it carries: `leader id=n3`. Written on the line, it replaces whatever label
 /// a style sheet gives the kind, so it has to stand on its own.
-fn said(e: &Value) -> Option<String> {
-    let extra = carried(e.get("body"), 48);
+fn said(e: &Value, max: usize) -> Option<String> {
+    let extra = carried(e.get("body"), max);
     if extra.is_empty() {
         None
     } else {
@@ -130,12 +130,13 @@ struct Line {
     detail: Option<String>,
 }
 
-/// How many messages a document carries before it stops.
+/// How many messages a document carries: all of them.
 ///
-/// Ten times what a Mermaid diagram is given: the renderer draws vectors, so its limit is what a
-/// browser will scroll through rather than what a parser will accept. A run that sends more than
-/// this is usually one that sends too much, and the document's title says it was cut.
-pub const ARROWS: usize = 2000;
+/// The limit this used to have was Mermaid's, copied over. Mermaid needs one because its
+/// renderers refuse a large diagram; a cuesheet document is text that a renderer draws as
+/// vectors, and a drawing of a run that leaves out its end hides exactly the part a failed run is
+/// usually judged on. A caller that wants less can still pass less.
+pub const ARROWS: usize = usize::MAX;
 
 pub fn render(
     journal: &Path,
@@ -222,7 +223,7 @@ pub fn render(
             "stimulus" => {
                 if let Some(n) = str_at(e, "dest") {
                     seen(n, &mut participants);
-                    let label = said(e).map(|l| format!(" {}", word(&l))).unwrap_or_default();
+                    let label = said(e, 48).map(|l| format!(" {}", word(&l))).unwrap_or_default();
                     push_with(
                         format!("{t} {} {}{label} .stimulus", word(n), word(&body_type(e))),
                         hover(e.get("body")),
@@ -233,7 +234,7 @@ pub fn render(
             "observe" => {
                 if let Some(n) = str_at(e, "src") {
                     seen(n, &mut participants);
-                    let label = said(e).map(|l| format!(" {}", word(&l))).unwrap_or_default();
+                    let label = said(e, 48).map(|l| format!(" {}", word(&l))).unwrap_or_default();
                     push_with(
                         format!("{t} {} {}{label} .observe", word(n), word(&body_type(e))),
                         hover(e.get("body")),
@@ -250,16 +251,19 @@ pub fn render(
                     seen(src, &mut participants);
                     seen(dest, &mut participants);
                     let ty = body_type(e);
+                    // Shorter than on a report: an arrow's label sits on its shaft, and a run has
+                    // far more arrows than reports.
+                    let label = said(e, 24).map(|l| format!(" {}", word(&l))).unwrap_or_default();
                     match u64_at(e, "mid").and_then(|m| arrival.get(&m)) {
                         Some(at) => push_with(
-                            format!("{t} {} -> {} .{} @{at}", word(src), word(dest), word(&ty)),
+                            format!("{t} {} -> {} .{}{label} @{at}", word(src), word(dest), word(&ty)),
                             hover(e.get("body")),
                         ),
                         // It left and never landed: the run ended first, or a partition was still
                         // holding it. Either way the document says when it left and where it was
                         // going, and the renderer works out that it is still in flight.
                         None => push_with(
-                            format!("{t} {} -> {} .{} @{}", word(src), word(dest), word(&ty), u64::MAX),
+                            format!("{t} {} -> {} .{}{label} @{}", word(src), word(dest), word(&ty), u64::MAX),
                             hover(e.get("body")),
                         ),
                     }
@@ -471,6 +475,22 @@ mod tests {
         let out = dir.join("messages.cuesheet");
         render(&j, None, &out, 1000).unwrap();
         std::fs::read_to_string(out).unwrap()
+    }
+
+    /// What an event carries is written on its line, so the drawing says it without a pointer:
+    /// whom a report names, what a request asks, what a message brings. And in full in the block
+    /// a renderer shows on hover.
+    #[test]
+    fn a_line_says_what_its_event_carries() {
+        let d = draw("carried", &[
+            r#"{"seq":0,"t":1,"kind":"stimulus","dest":"n0","body":{"type":"set","value":42}}"#,
+            r#"{"seq":1,"t":2,"kind":"observe","src":"n0","body":{"id":"n3","type":"leader"}}"#,
+            r#"{"seq":2,"t":3,"kind":"send","src":"n0","dest":"n1","mid":1,"body":{"rank":7,"type":"hi"}}"#,
+            r#"{"seq":3,"t":9,"kind":"recv","src":"n0","dest":"n1","mid":1,"body":{"rank":7,"type":"hi"}}"#,
+        ]);
+        assert!(d.contains("1 n0 set \"set value=42\" .stimulus {\n  type: set\n  value: 42\n}"), "{d}");
+        assert!(d.contains("2 n0 leader \"leader id=n3\" .observe {"), "{d}");
+        assert!(d.contains("3 n0 -> n1 .hi \"hi rank=7\" @9 {\n  rank: 7\n  type: hi\n}"), "{d}");
     }
 
     #[test]
