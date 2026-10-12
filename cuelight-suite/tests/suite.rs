@@ -134,10 +134,27 @@ fn a_node_that_does_not_replay_stops_the_suite_before_any_verdict() {
     assert!(text.contains("NOT DETERMINISTIC"), "{text}");
     // Nothing may be judged: every verdict below would describe a run nobody can reproduce.
     assert!(!text.contains("seeds passed"), "it judged anyway: {text}");
-    // And the case it replays must be one that exercises something. A written scenario is usually
+    // And the case it names must be one that exercises something. A written scenario is usually
     // written because it is degenerate; this suite's kills both nodes at t=1, and replaying it
-    // compares two empty journals.
+    // compares empty journals.
     assert!(text.contains("quiet seed 1"), "it replayed the wrong case: {text}");
+}
+
+/// One seed of the first scenario, twice, said nothing of the code another scenario brings into
+/// play. Every scenario about to be judged is replayed, several seeds of it, several times.
+#[test]
+fn every_scenario_is_replayed_before_any_is_judged() {
+    if !have_python() {
+        return;
+    }
+    let (ok, text) = demo_run("replays-all", "poked.py", &[]);
+    assert!(ok, "{text}");
+    let said = text.lines().find(|l| l.starts_with("deterministic:")).expect("the gate's line");
+    assert!(said.contains("each run 3 times"), "{said}");
+    assert!(said.contains("written scenario(s)"), "{said}");
+    assert!(said.contains("seed(s) of each of"), "{said}");
+    // Nothing of the replays is left behind once they agree.
+    assert!(!text.contains("replay/"), "{text}");
 }
 
 /// The first thing anyone sees, and it used to name the wrong thing: an unfilled skeleton dies on
