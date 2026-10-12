@@ -561,7 +561,47 @@ fn each_seed<T: Send>(lo: u64, hi: u64, jobs: usize, f: impl Fn(u64) -> T + Sync
     done
 }
 
-/// Replay one case and compare the two journals, before judging anything.
+/// How many times each replayed case is run. Two would catch a node that differs every time;
+/// three also catch most of those that differ only now and then.
+const REPLAYS: usize = 3;
+/// How many seeds of each parametric scenario are replayed.
+const REPLAYED_SEEDS: u64 = 5;
+
+/// Run one case `REPLAYS` times and compare the journals. `Err` says which two differ, and where.
+fn replay(o: &Opts, what: &str, dir: &Path, sc: &Scenario) -> Result<(), String> {
+    let mut runs: Vec<(PathBuf, String)> = vec![];
+    for pass in 0..REPLAYS {
+        let dir = dir.join(pass.to_string());
+        run_once(o, &dir, sc.clone()).map_err(|e| format!("FAILED: {e}"))?;
+        let j = dir.join("journal.jsonl");
+        let text =
+            std::fs::read_to_string(&j).map_err(|e| format!("FAILED: {}: {e}", j.display()))?;
+        runs.push((j, text));
+    }
+    let Some(other) = runs.iter().skip(1).find(|r| r.1 != runs[0].1) else {
+        return Ok(());
+    };
+
+    // Name the line, because "the journals differ" sends someone to diff two thousand-line files.
+    let line = runs[0]
+        .1
+        .lines()
+        .zip(other.1.lines())
+        .position(|(a, b)| a != b)
+        .map(|i| i + 1)
+        .unwrap_or_else(|| runs[0].1.lines().count().min(other.1.lines().count()) + 1);
+
+    Err(format!(
+        "NOT DETERMINISTIC: replaying {what} does not give the same journal every time.\n\
+         \x20 First difference on line {line}. A system clock, a thread, or unseeded randomness.\n\
+         \x20 compare {}\n\
+         \x20     and {}",
+        runs[0].0.display(),
+        other.0.display()
+    ))
+}
+
+/// Replay what this invocation is about to judge and compare the journals, before judging any.
 ///
 /// The error carries its own banner, because two very different things fail here and a newcomer
 /// meets the other one first: a node that is not written yet dies on its first event, and calling
@@ -572,61 +612,50 @@ fn each_seed<T: Send>(lo: u64, hi: u64, jobs: usize, f: impl Fn(u64) -> T + Sync
 /// and the replay command printed under each failure would replay something else. So this runs
 /// first, and stops the suite when it fails, rather than appearing as one line among the results.
 ///
-/// Two runs, against several hundred: the cost is invisible.
+/// It used to replay one seed of the first scenario, twice. A node can be deterministic there and
+/// not elsewhere: the code a crash or a slow link brings into play may never run in the first
+/// scenario at all. So every scenario this invocation runs is replayed — the first
+/// `REPLAYED_SEEDS` seeds it asks for of each parametric one, and each written one — `REPLAYS`
+/// times each. Against two hundred seeds a scenario, that is a few percent more runs.
 fn replays_identically(o: &Opts, suite: &Suite) -> Result<String, String> {
-    // A drawn scenario from the first parametric scenario, not the first written one. A written scenario is
-    // usually written *because* it is degenerate, and replaying one where every node dies at t=1
-    // compares two empty journals: the check passes without having exercised anything, and a node
-    // that reads the clock then collects a green verdict.
-    let (what, sc) = match suite.parametric.first() {
-        Some(p) => {
-            let sp = load_spaces(o, p).map_err(|e| format!("FAILED: {e}"))?;
-            (
-                format!("{} seed 1", label(p)),
-                Scenario::draw(1, &sp.space).from(provenance(p, &sp, 1)),
-            )
+    let wanted = |name: &str| o.only.as_ref().is_none_or(|pat| name.contains(pat.as_str()));
+    let root = o.out.join("replay");
+    let (mut scenarios, mut seeds_each, mut written) = (0usize, 0u64, 0usize);
+
+    for p in suite.parametric.iter().filter(|p| wanted(&label(p))) {
+        let sp = load_spaces(o, p).map_err(|e| format!("FAILED: {e}"))?;
+        let name = label(p);
+        let (lo, hi) = o.range.unwrap_or((1, o.seeds.unwrap_or(p.seeds)));
+        let hi = hi.min(lo + REPLAYED_SEEDS - 1);
+        // The lowest seed that fails is the one reported, whichever finished first.
+        let failed = each_seed(lo, hi, o.jobs, |seed| {
+            let sc = Scenario::draw(seed, &sp.space).from(provenance(p, &sp, seed));
+            replay(o, &format!("{name} seed {seed}"), &root.join(&name).join(seed.to_string()), &sc)
+        })
+        .into_iter()
+        .find_map(|(_, r)| r.err());
+        if let Some(e) = failed {
+            return Err(e);
         }
-        None => match suite.written.first() {
-            Some(w) => (
-                stem(w.path).to_string(),
-                load_scenario(&o.suite_dir.join(w.path)).map_err(|e| format!("FAILED: {e}"))?,
-            ),
-            None => return Ok(String::new()),
-        },
-    };
-
-    let mut runs = vec![];
-    for pass in ["a", "b"] {
-        let dir = o.out.join("replay").join(pass);
-        run_once(o, &dir, sc.clone()).map_err(|e| format!("FAILED: {e}"))?;
-        let j = dir.join("journal.jsonl");
-        let text =
-            std::fs::read_to_string(&j).map_err(|e| format!("FAILED: {}: {e}", j.display()))?;
-        runs.push((j, text));
+        scenarios += 1;
+        seeds_each = seeds_each.max(hi - lo + 1);
     }
-
-    if runs[0].1 == runs[1].1 {
-        let _ = std::fs::remove_dir_all(o.out.join("replay"));
-        return Ok(what);
+    // A written scenario has no seed: asking for one leaves them out of the run, so out of this.
+    for w in suite.written.iter().filter(|w| o.range.is_none() && wanted(stem(w.path))) {
+        let sc = load_scenario(&o.suite_dir.join(w.path)).map_err(|e| format!("FAILED: {e}"))?;
+        replay(o, stem(w.path), &root.join("written").join(stem(w.path)), &sc)?;
+        written += 1;
     }
+    let _ = std::fs::remove_dir_all(&root);
 
-    // Name the line, because "the journals differ" sends someone to diff two thousand-line files.
-    let line = runs[0]
-        .1
-        .lines()
-        .zip(runs[1].1.lines())
-        .position(|(a, b)| a != b)
-        .map(|i| i + 1)
-        .unwrap_or_else(|| runs[0].1.lines().count().min(runs[1].1.lines().count()) + 1);
-
-    Err(format!(
-        "NOT DETERMINISTIC: replaying {what} does not give the same journal twice.\n\
-         \x20 First difference on line {line}. A system clock, a thread, or unseeded randomness.\n\
-         \x20 compare {}\n\
-         \x20     and {}",
-        runs[0].0.display(),
-        runs[1].0.display()
-    ))
+    let mut parts = vec![];
+    if scenarios > 0 {
+        parts.push(format!("{seeds_each} seed(s) of each of {scenarios} parametric scenario(s)"));
+    }
+    if written > 0 {
+        parts.push(format!("{written} written scenario(s)"));
+    }
+    Ok(parts.join(" and "))
 }
 
 /// Entry point for the binary that owns a suite:
@@ -678,7 +707,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
     // First, and on its own: nothing below means anything if the node is not deterministic.
     match replays_identically(&o, &suite) {
         Ok(what) if what.is_empty() => {}
-        Ok(what) => println!("deterministic: replaying {what} gives the same journal twice\n"),
+        Ok(what) => println!("deterministic: {what}, each run {REPLAYS} times, give the same journal every time\n"),
         Err(e) => { eprintln!("{e}"); return ExitCode::FAILURE }
     }
 
