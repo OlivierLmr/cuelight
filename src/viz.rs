@@ -39,7 +39,13 @@ const HEADER: &str = concat!(
 /// diagram shows nothing at all. So this stays small, and the drawing says where it stopped.
 pub const ARROWS: usize = 200;
 
-pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String> {
+///
+/// When there are more than `limit`, which ones are drawn is decided by `around`: the instant the
+/// reader is looking for, when something knows it — a check that failed says when. A quarter of
+/// the room goes to what followed that instant and the rest to what led up to it, because a
+/// failure is explained by what came before. With no instant, the drawing starts where the run
+/// does.
+pub fn render(journal: &Path, out: &Path, limit: usize, around: Option<u64>) -> Result<usize, String> {
     let text = std::fs::read_to_string(journal).map_err(|e| format!("{}: {e}", journal.display()))?;
     let entries: Vec<Value> =
         text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect();
@@ -70,10 +76,30 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
         }
     }
 
-    let f = std::fs::File::open(journal).map_err(|e| format!("{}: {e}", journal.display()))?;
+    // Which messages are drawn: `limit` of them in a row, counted in the order they landed.
+    let landings: Vec<u64> = entries
+        .iter()
+        .filter(|v| v.get("kind").and_then(Value::as_str) == Some("recv"))
+        .map(|v| v.get("t").and_then(Value::as_u64).unwrap_or(0))
+        .collect();
+    let landed = landings.len();
+    let first = match around {
+        Some(a) if landed > limit => {
+            let before = landings.partition_point(|t| *t <= a);
+            before.saturating_sub(limit - limit / 4).min(landed - limit)
+        }
+        _ => 0,
+    };
+    // Nothing is drawn before this instant but what the network did to a process, which is rare
+    // and explains a lifeline that stays silent for the whole of the part that is drawn.
+    let opens_at = if first > 0 { landings[first] } else { 0 };
+
     let mut lines: Vec<String> = Vec::new();
     let mut participants: Vec<String> = Vec::new();
     let mut shown = 0usize;
+    let mut nth = 0usize;
+    // Where the note goes that says the drawing does not start where the run does.
+    let mut opening: Option<usize> = None;
 
     // Bring a name into the diagram, in first-seen order; the caller sorts the node names later.
     fn seen(p: &str, participants: &mut Vec<String>) {
@@ -99,7 +125,6 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
         }
     }
 
-    let _ = f;
     for (i, v) in entries.iter().enumerate() {
         let v = v.clone();
         let kind = v.get("kind").and_then(Value::as_str).unwrap_or("");
@@ -124,14 +149,21 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
             // The world asks a node for something. This is where a run starts, and drawing only
             // what followed left every delivery without a cause.
             "stimulus" => {
+                if t < opens_at {
+                    continue;
+                }
                 let dst = v.get("dest").and_then(Value::as_str).unwrap_or("?").to_string();
                 seen(&dst, &mut participants);
                 note(ASKED, &dst, format!("asked {} @{t}", told(&v, &ty(&v))), &mut lines);
             }
             // Delivery, not send: the diagram should show when a message actually landed.
             "recv" => {
-                if shown >= limit {
+                nth += 1;
+                if nth <= first || shown >= limit {
                     continue;
+                }
+                if first > 0 && opening.is_none() {
+                    opening = Some(lines.len());
                 }
                 let src = v.get("src").and_then(Value::as_str).unwrap_or("?").to_string();
                 let dst = v.get("dest").and_then(Value::as_str).unwrap_or("?").to_string();
@@ -149,6 +181,9 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
             // because a broadcast left half-delivered is the whole reason reliable broadcast exists.
             "never-sent" => {
                 let (src, dst) = (at("src"), at("dest"));
+                if t < opens_at {
+                    continue;
+                }
                 if let (Some(s), Some(d)) = (src, dst) {
                     seen(&s, &mut participants);
                     seen(&d, &mut participants);
@@ -194,7 +229,7 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
                 }
             }
             "observe" => {
-                if shown >= limit {
+                if t < opens_at || shown >= limit {
                     continue;
                 }
                 let src = v.get("src").and_then(Value::as_str).unwrap_or("?").to_string();
@@ -215,19 +250,25 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
         doc.push_str(&format!("    participant {p}\n"));
     }
 
-    for l in &lines {
+    // Said in the drawing, across every lifeline: a diagram that starts late or stops early and
+    // does not say so reads as a run in which nothing else happened.
+    let across = match (names.first(), names.last()) {
+        (Some(a), Some(b)) => format!("{a},{b}"),
+        _ => String::new(),
+    };
+    for (i, l) in lines.iter().enumerate() {
+        if opening == Some(i) && !across.is_empty() {
+            doc.push_str(&format!(
+                "    Note over {across}: the drawing starts here, at {opens_at}, {first} earlier messages not shown\n"
+            ));
+        }
         doc.push_str(l);
         doc.push('\n');
     }
-    // Said in the drawing, across every lifeline: a diagram that stops early and does not say so
-    // reads as a run in which nothing more happened.
-    let landed = entries.iter().filter(|v| v.get("kind").and_then(Value::as_str) == Some("recv")).count();
-    if landed > shown {
-        if let (Some(first), Some(last)) = (names.first(), names.last()) {
-            doc.push_str(&format!(
-                "    Note over {first},{last}: the drawing stops here, {shown} of {landed} messages shown\n"
-            ));
-        }
+    if landed > first + shown && !across.is_empty() {
+        doc.push_str(&format!(
+            "    Note over {across}: the drawing stops here, {shown} of {landed} messages shown\n"
+        ));
     }
 
     let mut w = std::fs::File::create(out).map_err(|e| e.to_string())?;
@@ -244,7 +285,7 @@ mod tests {
     ///
     /// `name` keeps each test in its own directory: tests run in parallel, and naming the
     /// directory after anything they share makes them clobber each other's files.
-    fn draw(name: &str, lines: &[&str]) -> String {
+    fn draw_around(name: &str, lines: &[&str], around: Option<u64>) -> String {
         let dir = std::env::temp_dir().join(format!("cuelight-viz-{name}"));
         let _ = std::fs::create_dir_all(&dir);
         let j = dir.join("journal.jsonl");
@@ -254,8 +295,12 @@ mod tests {
         }
         drop(f);
         let out = dir.join("m.mmd");
-        render(&j, &out, 100).unwrap();
+        render(&j, &out, 100, around).unwrap();
         std::fs::read_to_string(out).unwrap()
+    }
+
+    fn draw(name: &str, lines: &[&str]) -> String {
+        draw_around(name, lines, None)
     }
 
     /// A run starts because the world asked for something. Drawing only what followed left every
@@ -417,6 +462,38 @@ mod tests {
             &d[d.len().saturating_sub(300)..]
         );
         assert!(!draw("whole", &refs[..10]).contains("the drawing stops here"));
+    }
+
+    /// A run too long to draw whole is drawn around the instant the reader is after: mostly what
+    /// led up to it, some of what followed, and a note at each end that is not an end of the run.
+    #[test]
+    fn a_long_run_is_drawn_around_the_instant_asked_for() {
+        // `draw` renders with a limit of 100 messages: 75 up to the instant, 25 after it.
+        let mut lines: Vec<String> = vec![
+            r#"{"t":3,"kind":"fault-crash","detail":{"node":"n2"}}"#.into(),
+            r#"{"t":4,"kind":"observe","src":"n0","body":{"type":"early"}}"#.into(),
+        ];
+        for i in 0..1000 {
+            lines.push(format!(
+                r#"{{"t":{i},"kind":"recv","src":"n0","dest":"n1","mid":{i},"body":{{"type":"m"}}}}"#
+            ));
+        }
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let d = draw_around("around", &refs, Some(500));
+        assert!(d.contains("the drawing starts here, at 426, 426 earlier messages not shown"), "{d}");
+        assert!(d.contains("n0->>n1: m @426") && d.contains("n0->>n1: m @525"), "{d}");
+        assert!(!d.contains("m @425\n") && !d.contains("m @526\n"), "{d}");
+        assert!(d.contains("the drawing stops here, 100 of 1000 messages shown"), "{d}");
+        // What the network did to a process is kept from before the opening; a report is not.
+        assert!(d.contains("CRASH @3"), "{d}");
+        assert!(!d.contains("early"), "{d}");
+
+        // Asked for the very end, the drawing is the last hundred and does not say it stops.
+        let end = draw_around("around-end", &refs, Some(5000));
+        assert!(end.contains("m @900") && end.contains("m @999"), "{end}");
+        assert!(!end.contains("the drawing stops here"), "{end}");
+        // A run that fits is drawn whole wherever the instant is.
+        assert!(!draw_around("around-small", &refs[..50], Some(20)).contains("the drawing starts here"));
     }
 
     #[test]

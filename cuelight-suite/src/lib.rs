@@ -55,6 +55,9 @@ pub struct Check {
     pub kind: Kind,
     pub ok: bool,
     pub detail: String,
+    /// The instant this check is about, when it is about one: where a reader should look in the
+    /// run. A drawing too long to show whole is cut around it.
+    pub at: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -64,7 +67,16 @@ pub struct Report {
 
 impl Report {
     pub fn add(&mut self, name: &'static str, kind: Kind, ok: bool, detail: String) {
-        self.checks.push(Check { name, kind, ok, detail });
+        self.checks.push(Check { name, kind, ok, detail, at: None });
+    }
+    /// `add`, for a check that can say when: the instant of the first thing it found wrong, or the
+    /// one from which what it expected never came.
+    pub fn add_at(&mut self, name: &'static str, kind: Kind, ok: bool, detail: String, at: u64) {
+        self.checks.push(Check { name, kind, ok, detail, at: Some(at) });
+    }
+    /// The earliest instant a failed check points at, if any does.
+    pub fn failed_at(&self) -> Option<u64> {
+        self.checks.iter().filter(|c| !c.ok).filter_map(|c| c.at).min()
     }
     pub fn ok(&self) -> bool {
         self.checks.iter().all(|c| c.ok)
@@ -405,12 +417,12 @@ fn load_scenario(path: &Path) -> Result<Scenario, String> {
 /// and no build — which is exactly where a failing seed gets discussed. The cuesheet document
 /// draws a message as a segment from the instant it left to the instant it landed, so its slope is
 /// its flight time, which is the thing a horizontal arrow cannot say.
-fn draw(dir: &Path) -> Vec<PathBuf> {
+fn draw(dir: &Path, around: Option<u64>) -> Vec<PathBuf> {
     let journal = dir.join("journal.jsonl");
     let mut out = Vec::new();
 
     let mmd = dir.join("messages.mmd");
-    if cuelight::viz::render(&journal, &mmd, cuelight::viz::ARROWS).is_ok() {
+    if cuelight::viz::render(&journal, &mmd, cuelight::viz::ARROWS, around).is_ok() {
         out.push(mmd);
     }
 
@@ -430,12 +442,12 @@ fn draw(dir: &Path) -> Vec<PathBuf> {
 /// is cuesheet's and is written here as a literal, which is a coupling worth naming: if that CLI
 /// changes, this line goes stale with nothing to catch it. It is the same string JOURNAL.md
 /// carries, so the two drift together rather than separately.
-fn where_to_read(dir: &Path, style: Option<&str>) {
+fn where_to_read(dir: &Path, style: Option<&str>, around: Option<u64>) {
     let journal = dir.join("journal.jsonl");
     if journal.exists() {
         println!("    journal: {}", journal.display());
     }
-    let drawn = draw(dir);
+    let drawn = draw(dir, around);
     for (i, d) in drawn.iter().enumerate() {
         let label = if i == 0 { "diagram" } else { "        " };
         println!("    {label}: {}", d.display());
@@ -481,12 +493,14 @@ fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
 struct Failed {
     names: Vec<String>,
     said: Vec<String>,
+    /// Where in the run to look, when a failed check says.
+    at: Option<u64>,
 }
 
 impl Failed {
     /// The run itself went wrong, before anything could be judged.
     fn outright(why: String) -> Self {
-        Failed { names: vec![why], said: vec![] }
+        Failed { names: vec![why], said: vec![], at: None }
     }
 }
 
@@ -516,6 +530,7 @@ fn one_seed(o: &Opts, suite: &Suite, p: &Parametric, sp: &Spaces, name_of: &str,
         Some(Failed {
             names: r.failed().iter().map(|n| n.to_string()).collect(),
             said: r.checks.iter().filter(|c| !c.ok).map(|c| c.line()).collect(),
+            at: r.failed_at(),
         })
     }
 }
@@ -720,7 +735,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
                 println!("      {line}");
             }
             how_to_replay(&name, &o, &format!("--seed {s} --only {name_of}"));
-            where_to_read(&o.out.join(&name_of).join(s.to_string()), suite.style);
+            where_to_read(&o.out.join(&name_of).join(s.to_string()), suite.style, e.at);
         }
         if fails.len() > 5 {
             println!("  ... and {} more", fails.len() - 5);
@@ -766,7 +781,7 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
                     }
                     // Always, even when it behaved: a written scenario is often run precisely to
                     // be looked at, and the diagram is the reason to look.
-                    where_to_read(&dir, suite.style);
+                    where_to_read(&dir, suite.style, r.failed_at());
                 }
             },
         }

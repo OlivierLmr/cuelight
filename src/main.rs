@@ -15,7 +15,7 @@ cuelight: a deterministic discrete-event simulator for distributed systems
 USAGE:
     cuelight run    [options] --bin <cmd...>    one run
     cuelight check  [options] --bin <cmd...>    run twice, verify identical journals
-    cuelight viz    --journal <path> [--out <path>] [--format mermaid|cuesheet]
+    cuelight viz    --journal <path> [--out <path>] [--format mermaid|cuesheet] [--around <t>]
     cuelight scenario [options]                 print a drawn scenario, to edit by hand
 
 The harness executes one scenario and records what happened; it never judges. Loop over seeds
@@ -31,6 +31,8 @@ OPTIONS:
     --journal <path>   viz: journal to render
     --format <kind>    viz: mermaid (default, renders natively on GitHub) or
                        cuesheet (a space-time diagram, arrows slanted to their flight time)
+    --around <t>       viz: when a run has more messages than a Mermaid diagram can hold, draw
+                       the ones around this instant   [default: the start of the run]
 ";
 
 struct Args {
@@ -38,6 +40,7 @@ struct Args {
     scenario_path: Option<PathBuf>,
     journal: Option<PathBuf>,
     format: Option<String>,
+    around: Option<u64>,
     seed: u64,
     space: Space,
     /// Kept beside the parsed space so a drawn scenario can record where it came from, and what
@@ -55,6 +58,7 @@ impl Default for Args {
             scenario_path: None,
             journal: None,
             format: None,
+            around: None,
             seed: 1,
             space: Space::from_json("{}").expect("empty object is every default"),
             space_name: "(defaults)".into(),
@@ -83,6 +87,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--scenario" => { a.scenario_path = Some(PathBuf::from(val(i)?)); i += 2 }
             "--journal" => { a.journal = Some(PathBuf::from(val(i)?)); i += 2 }
             "--format" => { a.format = Some(val(i)?); i += 2 }
+            "--around" => { a.around = Some(val(i)?.parse().map_err(|_| "bad --around")?); i += 2 }
             "--seed" => { a.seed = val(i)?.parse().map_err(|_| "bad --seed")?; i += 2 }
             "--watchdog" => { a.watchdog = val(i)?.parse().map_err(|_| "bad --watchdog")?; i += 2 }
             "--out" => { a.out = PathBuf::from(val(i)?); i += 2 }
@@ -197,7 +202,7 @@ fn main() -> ExitCode {
             let result = match format.as_str() {
                 "mermaid" => {
                     let out = a.out.join("messages.mmd");
-                    viz::render(&j, &out, viz::ARROWS).map(|n| (out, n))
+                    viz::render(&j, &out, viz::ARROWS, a.around).map(|n| (out, n))
                 }
                 "cuesheet" => {
                     let out = a.out.join("messages.cuesheet");
