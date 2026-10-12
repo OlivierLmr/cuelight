@@ -197,7 +197,7 @@ fn main() -> ExitCode {
             let result = match format.as_str() {
                 "mermaid" => {
                     let out = a.out.join("messages.mmd");
-                    viz::render(&j, &out, 200).map(|n| (out, n))
+                    viz::render(&j, &out, viz::ARROWS).map(|n| (out, n))
                 }
                 "cuesheet" => {
                     let out = a.out.join("messages.cuesheet");
@@ -207,7 +207,7 @@ fn main() -> ExitCode {
                         let beside = j.with_file_name("scenario.json");
                         beside.exists().then_some(beside)
                     });
-                    cuesheet::render(&j, sc.as_deref(), &out, 200).map(|n| (out, n))
+                    cuesheet::render(&j, sc.as_deref(), &out, cuesheet::ARROWS).map(|n| (out, n))
                 }
                 other => Err(format!("unknown format {other}; there are two, mermaid and cuesheet")),
             };

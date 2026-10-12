@@ -33,6 +33,12 @@ const HEADER: &str = concat!(
     "\nsequenceDiagram\n"
 );
 
+/// How many messages a Mermaid diagram draws before it stops.
+///
+/// Mermaid renderers refuse a diagram past a certain size, GitHub's among them, and a refused
+/// diagram shows nothing at all. So this stays small, and the drawing says where it stopped.
+pub const ARROWS: usize = 200;
+
 pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String> {
     let text = std::fs::read_to_string(journal).map_err(|e| format!("{}: {e}", journal.display()))?;
     let entries: Vec<Value> =
@@ -82,6 +88,16 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
     fn safe(s: &str) -> String {
         s.replace(':', " ")
     }
+    // The type, then what the event carries: `leader id=n3`. The type alone says that a process
+    // reported a leader, never whom. `;` and `#` end a Mermaid statement or open an entity.
+    fn told(v: &Value, ty: &str) -> String {
+        let extra = crate::cuesheet::carried(v.get("body"), 40).replace([';', '#'], " ");
+        if extra.is_empty() {
+            safe(ty)
+        } else {
+            safe(&format!("{ty} {extra}"))
+        }
+    }
 
     let _ = f;
     for (i, v) in entries.iter().enumerate() {
@@ -110,7 +126,7 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
             "stimulus" => {
                 let dst = v.get("dest").and_then(Value::as_str).unwrap_or("?").to_string();
                 seen(&dst, &mut participants);
-                note(ASKED, &dst, format!("asked {} @{t}", safe(&ty(&v))), &mut lines);
+                note(ASKED, &dst, format!("asked {} @{t}", told(&v, &ty(&v))), &mut lines);
             }
             // Delivery, not send: the diagram should show when a message actually landed.
             "recv" => {
@@ -126,7 +142,7 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
                     Some(t0) if *t0 != t => format!("{t0} to {t}"),
                     _ => format!("@{t}"),
                 };
-                lines.push(format!("    {src}->>{dst}: {} {when}", safe(&ty(&v))));
+                lines.push(format!("    {src}->>{dst}: {} {when}", told(&v, &ty(&v))));
                 shown += 1;
             }
             // A send its author never made: it died partway through its send loop. Worth drawing,
@@ -183,7 +199,7 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
                 }
                 let src = v.get("src").and_then(Value::as_str).unwrap_or("?").to_string();
                 seen(&src, &mut participants);
-                note(REPORTED, &src, format!("{} @{t}", safe(&ty(&v))), &mut lines);
+                note(REPORTED, &src, format!("{} @{t}", told(&v, &ty(&v))), &mut lines);
             }
             _ => {}
         }
@@ -202,6 +218,16 @@ pub fn render(journal: &Path, out: &Path, limit: usize) -> Result<usize, String>
     for l in &lines {
         doc.push_str(l);
         doc.push('\n');
+    }
+    // Said in the drawing, across every lifeline: a diagram that stops early and does not say so
+    // reads as a run in which nothing more happened.
+    let landed = entries.iter().filter(|v| v.get("kind").and_then(Value::as_str) == Some("recv")).count();
+    if landed > shown {
+        if let (Some(first), Some(last)) = (names.first(), names.last()) {
+            doc.push_str(&format!(
+                "    Note over {first},{last}: the drawing stops here, {shown} of {landed} messages shown\n"
+            ));
+        }
     }
 
     let mut w = std::fs::File::create(out).map_err(|e| e.to_string())?;
@@ -355,6 +381,44 @@ mod tests {
     }
 
     /// Mermaid ends a note at a colon, so one inside a label silently truncates it.
+    /// A report says what it reports: the type alone tells a reader that a process named a
+    /// leader, never whom. Same for what the world asks, and for what a message carries.
+    #[test]
+    fn a_note_and_an_arrow_say_what_the_event_carries() {
+        let d = draw(
+            "carried",
+            &[
+                r#"{"t":1,"kind":"stimulus","dest":"n0","body":{"type":"set","value":42}}"#,
+                r#"{"t":2,"kind":"observe","src":"n0","body":{"id":"n3","type":"leader"}}"#,
+                r#"{"t":3,"kind":"send","src":"n0","dest":"n1","mid":1,"body":{"rank":7,"type":"hi"}}"#,
+                r#"{"t":9,"kind":"recv","src":"n0","dest":"n1","mid":1,"body":{"rank":7,"type":"hi"}}"#,
+            ],
+        );
+        assert!(d.contains("Note over n0: asked set value=42 @1"), "{d}");
+        assert!(d.contains("Note over n0: leader id=n3 @2"), "{d}");
+        assert!(d.contains("n0->>n1: hi rank=7"), "{d}");
+    }
+
+    /// A drawing that stops early says so, across every lifeline.
+    #[test]
+    fn a_drawing_that_is_cut_says_where() {
+        // `draw` renders with a limit of 100 messages.
+        let mut lines: Vec<String> = vec![];
+        for i in 0..105 {
+            lines.push(format!(
+                r#"{{"t":{i},"kind":"recv","src":"n0","dest":"n1","mid":{i},"body":{{"type":"m"}}}}"#
+            ));
+        }
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let d = draw("cut", &refs);
+        assert!(
+            d.contains("Note over n0,n1: the drawing stops here, 100 of 105 messages shown"),
+            "{}",
+            &d[d.len().saturating_sub(300)..]
+        );
+        assert!(!draw("whole", &refs[..10]).contains("the drawing stops here"));
+    }
+
     #[test]
     fn a_colon_in_a_label_does_not_truncate_it() {
         let d = draw("colon", &[r#"{"t":1,"kind":"observe","src":"n0","body":{"type":"a:b"}}"#]);

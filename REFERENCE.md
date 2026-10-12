@@ -197,7 +197,7 @@ cuelight scenario [options]                 print a drawn scenario, to edit by h
 | `--watchdog <ms>` | wall-clock hang detector (5000) |
 | `--out <dir>` | run directory (`store/latest`) |
 | `--journal <path>` | the journal `viz` renders |
-| `--format <kind>` | `mermaid` (default) writes `messages.mmd`, a sequence diagram that renders natively in a GitHub issue. `cuesheet` writes `messages.cuesheet`, a document [cuesheet](https://github.com/OlivierLmr/cuesheet) draws as a space-time diagram, with each arrow slanted from the instant its message left to the instant it landed. `cuesheet.cuestyle` in this repository says what the words in that document are |
+| `--format <kind>` | `mermaid` (default) writes `messages.mmd`, a sequence diagram that renders natively in a GitHub issue. `cuesheet` writes `messages.cuesheet`, a document [cuesheet](https://github.com/OlivierLmr/cuesheet) draws as a space-time diagram, with each arrow slanted from the instant its message left to the instant it landed. `cuesheet.cuestyle` in this repository says what the words in that document are. Both formats say what each report, request and message carries beside its type (`leader id=n3`), the cuesheet document also in a block its renderer shows on hover. A Mermaid file stops at 200 messages and a cuesheet document at 2000; each says so when it is cut |
 
 ### The suite your binary gets
 

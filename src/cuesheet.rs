@@ -62,12 +62,80 @@ fn body_type(v: &Value) -> String {
         .to_string()
 }
 
+/// What an event carries besides its type, as `key=value` words, in the journal's key order.
+///
+/// Still no vocabulary: nothing here knows what `id` or `value` mean, it writes whatever fields
+/// the protocol put there. A reader who sees a process report `leader` wants to know *whom*, and
+/// that is a field of the report, which the type alone never says.
+pub(crate) fn carried(body: Option<&Value>, max: usize) -> String {
+    let Some(obj) = body.and_then(Value::as_object) else { return String::new() };
+    let mut out = String::new();
+    for (k, v) in obj {
+        if k == "type" {
+            continue;
+        }
+        let v = match v {
+            Value::String(s) => s.replace(['\n', '\r'], " "),
+            other => other.to_string(),
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("{k}={v}"));
+    }
+    if out.chars().count() > max {
+        out = out.chars().take(max.saturating_sub(1)).collect::<String>() + "…";
+    }
+    out
+}
+
+/// The whole body, one `key: value` per line, for the block a renderer shows on hover.
+///
+/// Never a bare `}` on a line of its own: that is what closes the block.
+fn hover(body: Option<&Value>) -> Option<String> {
+    let obj = body.and_then(Value::as_object)?;
+    if obj.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = obj
+        .iter()
+        .map(|(k, v)| {
+            let v = match v {
+                Value::String(s) => s.replace(['\n', '\r'], " "),
+                other => other.to_string(),
+            };
+            format!("  {k}: {v}")
+        })
+        .collect();
+    Some(lines.join("\n"))
+}
+
+/// The kind, then what it carries: `leader id=n3`. Written on the line, it replaces whatever label
+/// a style sheet gives the kind, so it has to stand on its own.
+fn said(e: &Value) -> Option<String> {
+    let extra = carried(e.get("body"), 48);
+    if extra.is_empty() {
+        None
+    } else {
+        Some(format!("{} {extra}", body_type(e)))
+    }
+}
+
 /// One line of the document, with the instant it happens at so the whole set can be ordered once.
 struct Line {
     t: u64,
     seq: u64,
     text: String,
+    /// What a renderer shows when the line is pointed at.
+    detail: Option<String>,
 }
+
+/// How many messages a document carries before it stops.
+///
+/// Ten times what a Mermaid diagram is given: the renderer draws vectors, so its limit is what a
+/// browser will scroll through rather than what a parser will accept. A run that sends more than
+/// this is usually one that sends too much, and the document's title says it was cut.
+pub const ARROWS: usize = 2000;
 
 pub fn render(
     journal: &Path,
@@ -132,7 +200,12 @@ pub fn render(
         let kind = str_at(e, "kind").unwrap_or("");
         let t = u64_at(e, "t").unwrap_or(0);
         let seq = u64_at(e, "seq").unwrap_or(0);
-        let mut push = |text: String| lines.push(Line { t, seq, text });
+        let mut push_with = |text: String, detail: Option<String>| lines.push(Line { t, seq, text, detail });
+        macro_rules! push {
+            ($text:expr) => {
+                push_with($text, None)
+            };
+        }
 
         match kind {
             // Every process of the run, even one that never speaks. An empty lifeline is exactly
@@ -149,14 +222,22 @@ pub fn render(
             "stimulus" => {
                 if let Some(n) = str_at(e, "dest") {
                     seen(n, &mut participants);
-                    push(format!("{t} {} {} .stimulus", word(n), word(&body_type(e))));
+                    let label = said(e).map(|l| format!(" {}", word(&l))).unwrap_or_default();
+                    push_with(
+                        format!("{t} {} {}{label} .stimulus", word(n), word(&body_type(e))),
+                        hover(e.get("body")),
+                    );
                 }
             }
 
             "observe" => {
                 if let Some(n) = str_at(e, "src") {
                     seen(n, &mut participants);
-                    push(format!("{t} {} {} .observe", word(n), word(&body_type(e))));
+                    let label = said(e).map(|l| format!(" {}", word(&l))).unwrap_or_default();
+                    push_with(
+                        format!("{t} {} {}{label} .observe", word(n), word(&body_type(e))),
+                        hover(e.get("body")),
+                    );
                 }
             }
 
@@ -170,22 +251,17 @@ pub fn render(
                     seen(dest, &mut participants);
                     let ty = body_type(e);
                     match u64_at(e, "mid").and_then(|m| arrival.get(&m)) {
-                        Some(at) => push(format!(
-                            "{t} {} -> {} .{} @{at}",
-                            word(src),
-                            word(dest),
-                            word(&ty)
-                        )),
+                        Some(at) => push_with(
+                            format!("{t} {} -> {} .{} @{at}", word(src), word(dest), word(&ty)),
+                            hover(e.get("body")),
+                        ),
                         // It left and never landed: the run ended first, or a partition was still
                         // holding it. Either way the document says when it left and where it was
                         // going, and the renderer works out that it is still in flight.
-                        None => push(format!(
-                            "{t} {} -> {} .{} @{}",
-                            word(src),
-                            word(dest),
-                            word(&ty),
-                            u64::MAX
-                        )),
+                        None => push_with(
+                            format!("{t} {} -> {} .{} @{}", word(src), word(dest), word(&ty), u64::MAX),
+                            hover(e.get("body")),
+                        ),
                     }
                     drawn += 1;
                 }
@@ -203,21 +279,21 @@ pub fn render(
                 if let (Some(src), Some(dest)) = (src, dest) {
                     seen(src, &mut participants);
                     seen(dest, &mut participants);
-                    push(format!("{t} {} -> {} +1", word(src), word(dest)));
+                    push!(format!("{t} {} -> {} +1", word(src), word(dest)));
                 }
             }
 
             "fault-crash" => {
                 if let Some(n) = detail(e, "node").and_then(Value::as_str) {
                     seen(n, &mut participants);
-                    push(format!("{t} {} crash", word(n)));
+                    push!(format!("{t} {} crash", word(n)));
                 }
             }
 
             "node-died" => {
                 if let Some(n) = detail(e, "node").and_then(Value::as_str) {
                     seen(n, &mut participants);
-                    push(format!("{t} {} died", word(n)));
+                    push!(format!("{t} {} died", word(n)));
                 }
             }
 
@@ -226,7 +302,7 @@ pub fn render(
                 if let Some(n) = detail(e, "node").and_then(Value::as_str) {
                     let until = detail(e, "until").and_then(Value::as_u64).unwrap_or(t);
                     seen(n, &mut participants);
-                    push(format!("{t} {} paused @{until}", word(n)));
+                    push!(format!("{t} {} paused @{until}", word(n)));
                 }
             }
 
@@ -240,7 +316,7 @@ pub fn render(
                     .unwrap_or_default();
                 let until = detail(e, "until").and_then(Value::as_u64).unwrap_or(t);
                 if !side.is_empty() {
-                    push(format!("{t} network split {} @{until}", side.join(" ")));
+                    push!(format!("{t} network split {} @{until}", side.join(" ")));
                 }
             }
 
@@ -259,16 +335,16 @@ pub fn render(
                         }
                     });
                     match fired {
-                        Some(at) => push(format!("{t} {} set_timer @{at}", word(n))),
+                        Some(at) => push!(format!("{t} {} set_timer @{at}", word(n))),
                         // Armed and never fired: the node crashed, or the run ended first.
-                        None => push(format!("{t} {} set_timer", word(n))),
+                        None => push!(format!("{t} {} set_timer", word(n))),
                     }
                 }
             }
 
             "unknown-destination" => {
                 if let Some(d) = detail(e, "dest").and_then(Value::as_str) {
-                    push(format!("{t} network unknown-destination {}", word(d)));
+                    push!(format!("{t} network unknown-destination {}", word(d)));
                 }
             }
 
@@ -276,7 +352,7 @@ pub fn render(
                 let reason = detail(e, "reason")
                     .and_then(Value::as_str)
                     .unwrap_or(if kind == "time-limit" { "time-limit" } else { "end" });
-                end = Some(Line { t, seq, text: format!("{t} run end {}", word(reason)) });
+                end = Some(Line { t, seq, text: format!("{t} run end {}", word(reason)), detail: None });
             }
 
             _ => {}
@@ -305,10 +381,19 @@ pub fn render(
     if let Some(s) = scenario {
         doc.push_str(&provenance(s));
     }
+    // Said in the document itself, where the reader is looking: a drawing that stops early and
+    // does not say so reads as a run in which nothing more happened.
+    let sent = entries.iter().filter(|e| str_at(e, "kind") == Some("send")).count();
+    if sent > drawn {
+        doc.push_str(&format!("title \"the first {drawn} of {sent} messages\"\n"));
+    }
     doc.push_str(&format!("participants {}\n\n", participants.join(" ")));
     for l in &lines {
         doc.push_str(&l.text);
-        doc.push('\n');
+        match &l.detail {
+            Some(d) => doc.push_str(&format!(" {{\n{d}\n}}\n")),
+            None => doc.push('\n'),
+        }
     }
 
     let mut w = std::fs::File::create(out).map_err(|e| format!("{}: {e}", out.display()))?;

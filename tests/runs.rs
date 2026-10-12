@@ -384,7 +384,12 @@ fn a_run_becomes_a_document_that_names_every_process_and_every_fault() {
     assert!(d.contains("run end quiescent"), "the end is missing");
     // The protocol's own words, with the journal's categorisation as a class.
     assert!(d.contains(".hello") && d.contains(".ack"), "message types are missing");
-    assert!(d.contains("deliver .observe"), "observations are missing");
+    // An observation says what it reports, on its line and in the block shown on hover: the kind
+    // alone tells a reader that something was delivered, never what.
+    assert!(d.contains("deliver \"deliver mid=ack-from-"), "observations are missing:\n{d}");
+    assert!(d.contains(".observe {\n  mid: ack-from-"), "an observation has no hover block:\n{d}");
+    // A message carries its body the same way, and no label: thousands of arrows would bury it.
+    assert!(d.contains(".hello @") && d.contains("{\n  type: hello\n}"), "a message has no hover block:\n{d}");
 }
 
 /// Every arrow says when it left and when it landed, which is what makes the slope mean something.
@@ -400,6 +405,8 @@ fn every_arrow_in_the_document_carries_two_instants() {
             continue;
         }
         arrows += 1;
+        // The line may end by opening the block that holds what the message carries.
+        let line = line.strip_suffix(" {").unwrap_or(line);
         let last = line.split_whitespace().last().unwrap();
         assert!(
             last.starts_with('@') || last.starts_with('+'),

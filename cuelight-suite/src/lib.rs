@@ -75,9 +75,16 @@ impl Report {
     }
     pub fn print(&self) {
         for c in &self.checks {
-            let k = if c.kind == Kind::Safety { "safety  " } else { "liveness" };
-            println!("  {} {k} {:<20} {}", if c.ok { "ok  " } else { "FAIL" }, c.name, c.detail);
+            println!("  {}", c.line());
         }
+    }
+}
+
+impl Check {
+    /// One check as a line: its verdict, what kind of property it is, its name, and what it found.
+    fn line(&self) -> String {
+        let k = if self.kind == Kind::Safety { "safety  " } else { "liveness" };
+        format!("{} {k} {:<20} {}", if self.ok { "ok  " } else { "FAIL" }, self.name, self.detail)
     }
 }
 
@@ -403,14 +410,14 @@ fn draw(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
 
     let mmd = dir.join("messages.mmd");
-    if cuelight::viz::render(&journal, &mmd, 200).is_ok() {
+    if cuelight::viz::render(&journal, &mmd, cuelight::viz::ARROWS).is_ok() {
         out.push(mmd);
     }
 
     let st = dir.join("messages.cuesheet");
     let scenario = dir.join("scenario.json");
     let sc = scenario.exists().then_some(scenario);
-    if cuelight::cuesheet::render(&journal, sc.as_deref(), &st, 200).is_ok() {
+    if cuelight::cuesheet::render(&journal, sc.as_deref(), &st, cuelight::cuesheet::ARROWS).is_ok() {
         out.push(st);
     }
     out
@@ -467,20 +474,38 @@ fn run_once(o: &Opts, dir: &Path, scenario: Scenario) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// Why a seed did not pass: the names of what failed, and under them what each check said.
+///
+/// The names alone are an address, not an explanation. `validite` tells a reader which property to
+/// reread; "the most able correct process is n0, but n4 names n7" tells them what to look for.
+struct Failed {
+    names: Vec<String>,
+    said: Vec<String>,
+}
+
+impl Failed {
+    /// The run itself went wrong, before anything could be judged.
+    fn outright(why: String) -> Self {
+        Failed { names: vec![why], said: vec![] }
+    }
+}
+
 /// Run and judge one seed of one parametric scenario. `None` is a pass; otherwise, why not.
-fn one_seed(o: &Opts, suite: &Suite, p: &Parametric, sp: &Spaces, name_of: &str, seed: u64) -> Option<String> {
+fn one_seed(o: &Opts, suite: &Suite, p: &Parametric, sp: &Spaces, name_of: &str, seed: u64) -> Option<Failed> {
     let dir = o.out.join(name_of).join(seed.to_string());
     let sc = Scenario::draw(seed, &sp.space).from(provenance(p, sp, seed));
     let late = past_the_limit(&sc);
     if late > 0 {
-        return Some(format!("{late} event(s) scheduled past the time limit; they cannot happen"));
+        return Some(Failed::outright(format!(
+            "{late} event(s) scheduled past the time limit; they cannot happen"
+        )));
     }
     if let Err(e) = run_once(o, &dir, sc.clone()) {
-        return Some(e);
+        return Some(Failed::outright(e));
     }
     let ev = match load_events(&dir) {
         Ok(ev) => ev,
-        Err(e) => return Some(e),
+        Err(e) => return Some(Failed::outright(e)),
     };
     let mut r = Report::default();
     (suite.check)(&ev, &sc, &mut r);
@@ -488,7 +513,10 @@ fn one_seed(o: &Opts, suite: &Suite, p: &Parametric, sp: &Spaces, name_of: &str,
         let _ = std::fs::remove_dir_all(&dir); // keep only failures
         None
     } else {
-        Some(r.failed().join(", "))
+        Some(Failed {
+            names: r.failed().iter().map(|n| n.to_string()).collect(),
+            said: r.checks.iter().filter(|c| !c.ok).map(|c| c.line()).collect(),
+        })
     }
 }
 
@@ -662,14 +690,35 @@ pub fn run(suite: Suite, default_suite_dir: &str) -> ExitCode {
         // are the five lowest whatever finished first.
         let verdicts = each_seed(lo, hi, o.jobs, |seed| one_seed(&o, &suite, p, &sp, &name_of, seed));
         let pass = verdicts.iter().filter(|(_, v)| v.is_none()).count() as u64;
-        let fails: Vec<(u64, String)> =
+        let fails: Vec<(u64, Failed)> =
             verdicts.into_iter().filter_map(|(seed, v)| v.map(|why| (seed, why))).collect();
         println!("{name_of}: {pass}/{} seeds passed{}", hi - lo + 1,
                  if o.range.is_some() { format!(" (seeds {lo}..{hi})") } else { String::new() });
+        // How many seeds each check failed on. The five seeds shown below are the five lowest, not
+        // a sample: without this line a reader cannot tell one failing property from six.
+        let mut tally: Vec<(String, usize)> = vec![];
+        for (_, f) in &fails {
+            if f.said.is_empty() {
+                continue;
+            }
+            for n in &f.names {
+                match tally.iter_mut().find(|(name, _)| name == n) {
+                    Some(t) => t.1 += 1,
+                    None => tally.push((n.clone(), 1)),
+                }
+            }
+        }
+        if !tally.is_empty() {
+            let parts: Vec<String> = tally.iter().map(|(n, c)| format!("{n} on {c}")).collect();
+            println!("  failed: {}", parts.join(", "));
+        }
         for (s, e) in fails.iter().take(5) {
             // The address of a failure is the triple, not the seed: a seed names a run only
             // relative to the two spaces it was drawn from.
-            println!("  seed {s}: {e}");
+            println!("  seed {s}: {}", e.names.join(", "));
+            for line in &e.said {
+                println!("      {line}");
+            }
             how_to_replay(&name, &o, &format!("--seed {s} --only {name_of}"));
             where_to_read(&o.out.join(&name_of).join(s.to_string()), suite.style);
         }
