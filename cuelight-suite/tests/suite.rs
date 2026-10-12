@@ -219,3 +219,17 @@ fn zero_jobs_is_refused() {
     let (ok, out) = demo_run("jobs-zero", "poked.py", &["--jobs", "0"]);
     assert!(!ok && out.contains("--jobs 0"), "{out}");
 }
+
+/// Under a failing seed, what each failed check found, and above them how many seeds each check
+/// failed on. A name alone is an address; the sentence is what tells a reader what to look for.
+#[test]
+fn a_failing_seed_says_what_each_check_found() {
+    if !have_python() {
+        return;
+    }
+    let (ok, out) = demo_run("said", "silent.py", &["--seeds", "8", "--only", "quiet"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("failed: every-poke-answered on 8"), "{out}");
+    assert!(out.contains("  seed 1: every-poke-answered\n      FAIL liveness every-poke-answered"), "{out}");
+    assert!(out.contains("pokes answered"), "the check's own sentence is missing:\n{out}");
+}
