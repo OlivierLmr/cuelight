@@ -188,7 +188,7 @@ impl Sim {
 
         for env in outputs {
             if env.dest == HARNESS {
-                self.handle_harness_message(idx, env);
+                self.handle_harness_message(idx, env)?;
                 continue;
             }
             let Some(&to) = self.index.get(&env.dest) else {
@@ -207,13 +207,27 @@ impl Sim {
         Ok(())
     }
 
-    fn handle_harness_message(&mut self, idx: usize, env: Envelope) {
+    fn handle_harness_message(&mut self, idx: usize, env: Envelope) -> Result<(), String> {
         match env.kind() {
             "set_timer" => {
-                let after = env.u64_field("after").unwrap_or(0);
                 let timer_id = env.u64_field("timer_id").unwrap_or(0);
                 self.journal.record(self.now, "set_timer", &env);
-                let at = self.now + after;
+                // A delay that is not a whole number of ticks, or lands past the end of time,
+                // fails the run. It used to read as 0: `400.0` from Python, or a timeout doubled
+                // past 2^64, fired at once, and a node re-arming it spun through millions of
+                // steps in one logical instant, writing gigabytes of journal before anything
+                // noticed.
+                let Some(at) = env.u64_field("after").and_then(|a| self.now.checked_add(a)) else {
+                    let after = env.body.get("after").cloned().unwrap_or(serde_json::Value::Null);
+                    let id = self.nodes[idx].id.clone();
+                    self.journal.note(self.now, "bad-timer", json!({ "node": id, "after": after }));
+                    return Err(format!(
+                        "node {id} armed a timer with after={after} at t={}: `after` must be \
+                         present, a whole number of ticks, at least 0, and small enough that \
+                         t + after fits in 64 bits",
+                        self.now
+                    ));
+                };
                 self.schedule(at, Ev::Timer { node: idx, timer_id });
             }
             // Anything else a node sends to the harness is an *observation*: it is recorded and
@@ -225,6 +239,7 @@ impl Sim {
                 self.journal.record(self.now, "observe", &env);
             }
         }
+        Ok(())
     }
 
     fn apply_fault(&mut self, i: usize) {

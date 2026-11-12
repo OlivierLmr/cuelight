@@ -52,6 +52,9 @@ the template's own test: if your language's plumbing is right, you get exactly t
 one per peer, one per round, one per pending request, and they must not
 collide.
 
+`after` is a **whole number of ticks**, at least 0. A float (`400.0`, `T * 1.5`) or a negative
+fails the run, naming the node and the value; round it yourself.
+
 Timers **cannot be cancelled**. If you re-arm one, guard the callback with a generation counter and
 ignore stale firings:
 

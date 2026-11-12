@@ -233,6 +233,35 @@ fn a_node_that_exits_on_its_own_fails_the_run() {
     assert!(err.contains("exited on its own"), "unhelpful message: {err}");
 }
 
+/// A timer delay that is not a whole number of ticks fails the run. It used to read as 0, so
+/// `400.0` from Python, or a timeout doubled past 2^64, fired at once, and a node re-arming it spun
+/// in one logical instant, writing gigabytes of journal.
+#[test]
+fn a_timer_that_is_not_a_whole_tick_count_fails_the_run() {
+    if !have_python() {
+        return;
+    }
+    let cases = [("float", "400.0"), ("huge", "2**70"), ("negative", "-1"), ("string", "'400'")];
+    for (name, after) in cases {
+        let out = tmp(&format!("timer-{name}"));
+        let o = Command::new(BIN)
+            .args(["run", "--seed", "1", "--out"])
+            .arg(&out)
+            .arg("--bin")
+            .arg("python3")
+            .arg(root().join("testdata").join("bad-timer.py"))
+            .env("AFTER", after)
+            .current_dir(root())
+            .output()
+            .unwrap();
+        assert!(!o.status.success(), "after={after} and the run still passed");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("whole number of ticks"), "unhelpful message for after={after}: {err}");
+        let journal = std::fs::read_to_string(out.join("journal.jsonl")).unwrap();
+        assert!(journal.contains("\"bad-timer\""), "after={after} not journalled");
+    }
+}
+
 /// Crashes land at the instant the scenario names, and a crashed sender's in-flight messages are
 /// A crash lands when the scenario says, and stops the sends its victim had not got out yet.
 ///
