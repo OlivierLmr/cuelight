@@ -75,6 +75,7 @@ verbatim and moves on.
 | `drop-to-crashed` | `src`, `dest`, `mid` | a message reached a node that was already dead, and died at its lifeline |
 | `never-sent` | `src`, `dest`, `mid` | a message its author never got out: it died partway through its send loop |
 | `node-died` | `node` | a node exited **on its own**. The harness did not do this, and the run has failed |
+| `bad-timer` | `node`, `after` | a node armed a timer whose `after` is not a whole number of ticks (a float, a negative, or past 2^64). The run has failed |
 | `unknown-destination` | `dest` | a node addressed something that is not a node or `harness` |
 | `time-limit` | `limit` | the run was cut off rather than settling |
 | `end` | `reason`, `scheduled` | always last. `reason` is `quiescent`, `time-limit`, or a failure |
