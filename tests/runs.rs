@@ -241,7 +241,8 @@ fn a_timer_that_is_not_a_whole_tick_count_fails_the_run() {
     if !have_python() {
         return;
     }
-    for (name, after) in [("float", "400.0"), ("huge", "2**70"), ("negative", "-1")] {
+    let cases = [("float", "400.0"), ("huge", "2**70"), ("negative", "-1"), ("string", "'400'")];
+    for (name, after) in cases {
         let out = tmp(&format!("timer-{name}"));
         let o = Command::new(BIN)
             .args(["run", "--seed", "1", "--out"])

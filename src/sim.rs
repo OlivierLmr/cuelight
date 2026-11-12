@@ -222,9 +222,9 @@ impl Sim {
                     let id = self.nodes[idx].id.clone();
                     self.journal.note(self.now, "bad-timer", json!({ "node": id, "after": after }));
                     return Err(format!(
-                        "node {id} armed a timer with after={after} at t={}: `after` must be a \
-                         whole number of ticks, at least 0, and small enough that t + after \
-                         fits in 64 bits",
+                        "node {id} armed a timer with after={after} at t={}: `after` must be \
+                         present, a whole number of ticks, at least 0, and small enough that \
+                         t + after fits in 64 bits",
                         self.now
                     ));
                 };

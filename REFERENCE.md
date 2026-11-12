@@ -29,7 +29,7 @@ cuelight interprets only messages addressed to `"harness"`. Anything addressed t
 
 | `type` | Meaning |
 |---|---|
-| `set_timer` | arm a timer: `after` (in **logical** time) and `timer_id` |
+| `set_timer` | arm a timer: `after` (in **logical** time, a whole number of ticks ≥ 0; anything else fails the run) and `timer_id` |
 | `done` | **required**, last, after every event |
 | *anything else* | an **observation**, recorded verbatim in the journal |
 
