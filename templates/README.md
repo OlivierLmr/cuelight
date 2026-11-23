@@ -17,6 +17,10 @@ All four are verified against the same scenarios and produce identical results:
 | Java | `javac -d out cuelight/*.java example/Main.java` | none. A minimal JSON reader is included, so no build tooling is needed |
 | C++ | `c++ -std=c++17 -O2 -o example example/main.cpp` | none, header-only |
 
+Run the Java node as `java -Xlog:disable -Xlog:all=warning:stderr -cp out Main`. The JVM writes
+its own warnings to stdout by default, where cuelight reads them as an invalid message and stops the
+node; these two options send them to stderr instead.
+
 Each ships an `example/` node playing **ping-pong**: n0 pings the next node around the ring, which
 pongs back, for five rounds. It touches every part of the template: handler registration, `send`,
 `set_timer` with a callback, `observe`. It deliberately implements **no distributed algorithm**,
