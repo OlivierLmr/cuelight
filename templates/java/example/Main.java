@@ -5,7 +5,7 @@
 // implements no distributed algorithm.
 //
 //   javac -d out cuelight/*.java example/Main.java
-//   cuelight run --seed 1 --bin java -cp out Main
+//   cuelight run --seed 1 --bin java -Xlog:disable -Xlog:all=warning:stderr -cp out Main
 import cuelight.Node;
 
 public class Main {
